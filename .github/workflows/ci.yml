@@ -240,7 +240,9 @@ jobs:
           version="$(node -p "require('./cpp/vcpkg.json').version")"
           tarball="$(bash .github/scripts/cpp-source-tarball.sh "$version" "$RUNNER_TEMP/cpp-dist")"
           sha="$(sha256sum "$tarball" | cut -d' ' -f1)"
-          tar -tzf "$tarball" | head -n 20
+          # sed reads the whole listing: `| head` would close the pipe early, and with SIGPIPE ignored (as on GitHub
+          # runners) tar then fails with "write error" (exit 2), which pipefail turns into a failed step.
+          tar -tzf "$tarball" | sed -n '1,20p'
           cmake -S cpp/tests/package_consumer -B build/consumer-fetch -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DVELSIGIL_CONSUMER_MODE=fetchcontent -DVELSIGIL_URL="$tarball" -DVELSIGIL_URL_HASH="SHA256=$sha"
           cmake --build build/consumer-fetch
