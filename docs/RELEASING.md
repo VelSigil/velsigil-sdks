@@ -10,7 +10,7 @@ environment.
 |---|---|---|---|
 | npm | `velsigil-client` (unscoped) | owner `VelSigil`, repository `velsigil-sdks`, workflow `release.yml`, environment `npm`, **stage publish only** | `npm` |
 | PyPI | `velsigil-client` | pending publisher: owner `VelSigil`, repository `velsigil-sdks`, workflow `release.yml`, environment `pypi` | `pypi` |
-| nuget.org | `Velsigil.Client` | policy: owner `VelSigil`, repository `velsigil-sdks`, workflow `release.yml`, environment `nuget`; NuGet login user `velsigil-client` | `nuget` |
+| nuget.org | `Velsigil.Client` | policy: owner `VelSigil`, repository `velsigil-sdks`, workflow `release.yml`, environment `nuget`, package owner: organization `velsigil-client`; NuGet login user `velsigil` (who created the policy) | `nuget` |
 | GitHub | release `vX.Y.Z` with `velsigil-cpp-X.Y.Z.tar.gz`, SBOMs, `SHA256SUMS`, attestation bundle | `GITHUB_TOKEN` of the `github-release` job (`contents: write`); no registry | `github-release` |
 
 **Spell the owner exactly `VelSigil`.** That is how GitHub spells the account (its login has a capital V and S), and
@@ -182,14 +182,17 @@ first upload). As of 2026-10-07 you are still waiting for an approval on PyPI (s
 
 ## 5. nuget.org
 
-1. *Your profile > Trusted Publishing*: add a policy, signed in as `velsigil-client`: repository owner `VelSigil`,
-   repository `velsigil-sdks`, workflow file `release.yml`, environment `nuget`; scope **Push new packages and
-   package versions**, package `Velsigil.Client`; unlisting not allowed. (nuget.org compares these case-insensitively;
-   use the same spelling anyway.)
-2. The workflow logs in with `NuGet/login` as `user: velsigil-client`. That must be the nuget.org **profile name** (not
-   an e-mail address) of the account that **creates** the policy, even if the policy is owned by a nuget.org
-   organization. If you ever create the policy from another account, change `user:` in `release.yml`. The key it
-   receives is valid for one hour and only for this push.
+The accounts: you sign in to nuget.org as the **user `velsigil`**; the **organization `velsigil-client`** (which that
+user manages) holds the reserved `Velsigil` prefix and owns the package.
+
+1. *Your profile > Trusted Publishing*: add a policy, signed in as `velsigil`, with the package owner
+   **`velsigil-client`** (the organization): repository owner `VelSigil`, repository `velsigil-sdks`, workflow file
+   `release.yml`, environment `nuget`; scope **Push new packages and package versions**, package `Velsigil.Client`;
+   unlisting not allowed. (nuget.org stores the repository owner in lower case and compares case-insensitively.)
+2. The workflow logs in with `NuGet/login` as `user: velsigil`: the nuget.org **profile name** (not an e-mail address)
+   of the user who **created** the policy, never the organization that owns it (that fails with "No matching trust
+   policy owned by user ...", as it did for v1.0.0). If you ever create the policy from another user, change `user:`
+   in `release.yml`. The key it receives is valid for one hour and only for this push.
 
 ## 6. Every release
 
@@ -228,16 +231,20 @@ first upload). As of 2026-10-07 you are still waiting for an approval on PyPI (s
 6. **Check the result**: `npm view velsigil-client@X.Y.Z dist.attestations`; the provenance and attestation panels on
    npmjs.com and pypi.org; the reserved-prefix checkmark on nuget.org; `gh release verify vX.Y.Z --repo
    VelSigil/velsigil-sdks`. [VERIFYING.md](VERIFYING.md) has the commands sellers use.
-7. **After `1.0.0` only**: retire the bootstrap version (`latest` already points to `1.0.0` after the approval):
+7. **After the first stable npm version only** (1.0.1: 1.0.0 never reached npm): retire the bootstrap version
+   (`latest` already points to the stable version after the approval):
 
    ```sh
-   npm view velsigil-client dist-tags                 # latest: 1.0.0
-   npm deprecate velsigil-client@1.0.0-rc.0 "Bootstrap release; use 1.0.0 or later"
+   npm view velsigil-client dist-tags                 # latest: 1.0.1
+   npm deprecate velsigil-client@1.0.0-rc.0 "Bootstrap release; use 1.0.1 or later"
    npm dist-tag rm velsigil-client next
    ```
 
 Re-running: a job that failed after its registry accepted the package fails again on the duplicate version (npm,
-PyPI and nuget.org versions are immutable; that is intended). Fix forward with the next patch version.
+PyPI and nuget.org versions are immutable; that is intended). Fix forward with the next patch version. A fix to
+`release.yml` itself also needs a new version: a re-run uses the workflow of the tagged commit, and once the GitHub
+release exists its tag can no longer be moved (release immutability). That is why v1.0.0 is a C++-only GitHub
+release and 1.0.1 is the first version on npm, nuget.org and PyPI.
 
 ## 7. Keeping the pinned toolchain current
 

@@ -253,7 +253,9 @@ jobs:
       - name: npm stage publish (from the built tarball, with provenance)
         env:
           VERSION: ${{ needs.build.outputs.version }}
-        run: npm stage publish "./dist/velsigil-client-$VERSION.tgz" --access public --provenance
+        # --loglevel verbose: if the trusted-publisher exchange fails, npm only says ENEEDAUTH; the verbose log shows
+        # why (it never prints the token itself).
+        run: npm stage publish "./dist/velsigil-client-$VERSION.tgz" --access public --provenance --loglevel verbose
       - name: How to approve
         env:
           VERSION: ${{ needs.build.outputs.version }}
@@ -332,7 +334,10 @@ jobs:
         id: login
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         with:
-          user: velsigil-client
+          # The nuget.org USER who created the trusted-publishing policy (not the organization velsigil-client, which
+          # owns the package and the reserved prefix). With the organization's name the token exchange fails with
+          # "No matching trust policy owned by user ..." (release v1.0.0).
+          user: velsigil
       - name: dotnet nuget push (.nupkg, then .snupkg)
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}

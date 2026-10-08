@@ -1,5 +1,13 @@
 # Changelog - Velsigil Python SDK (`velsigil-client`)
 
+## 1.0.1 (2026-10-08)
+
+No code changes from 1.0.0. The release workflow of 1.0.0 published only the C++ source release on GitHub: its
+nuget.org upload signed in with the organization's name instead of the user who created the trusted-publishing
+policy, and its npm upload was not matched by the trusted publisher. 1.0.1 releases all four SDKs together again.
+
+- First version on PyPI (published once PyPI has approved the project). 1.0.0 was not uploaded to PyPI.
+
 ## 1.0.0 (2026-10-08)
 
 ### Packaging and distribution (2026-10-07)

@@ -33,7 +33,7 @@
 namespace velsigil {
 
 /// SDK version (semantic versioning).
-inline constexpr char kSdkVersion[] = "1.0.0";
+inline constexpr char kSdkVersion[] = "1.0.1";
 
 /// Result codes. Server codes are defined in SPEC section 10.3; the SDK adds a few local ones.
 namespace codes {

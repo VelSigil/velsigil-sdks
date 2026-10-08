@@ -1,5 +1,14 @@
 # Changelog - Velsigil C++ SDK (`velsigil`)
 
+## 1.0.1 (2026-10-08)
+
+No code changes from 1.0.0. The release workflow of 1.0.0 published only the C++ source release on GitHub: its
+nuget.org upload signed in with the organization's name instead of the user who created the trusted-publishing
+policy, and its npm upload was not matched by the trusted publisher. 1.0.1 releases all four SDKs together again.
+
+- Same sources as 1.0.0, which stays available as its own GitHub release; released again so that all four SDKs
+  share one version.
+
 ## 1.0.0 (2026-10-08)
 
 ### Packaging and distribution (2026-10-07)
