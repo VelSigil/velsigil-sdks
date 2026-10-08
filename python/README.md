@@ -6,8 +6,8 @@ checks for and downloads updates. Every response that can report success is
 **Ed25519-signed by your Velsigil server and verified by the SDK** before it is used.
 
 - Python **3.10+** on Windows, macOS and Linux (releases are tested on 3.10 and 3.14)
-- One runtime dependency: [`cryptography`](https://cryptography.io) (≥ 48.0.1, the first release whose bundled OpenSSL has no
-  published advisory). `PyNaCl` (≥ 1.6.2) is an optional fallback.
+- One runtime dependency: [`cryptography`](https://cryptography.io) (≥ 50.0.0, the first release with no published
+  advisory). `PyNaCl` (≥ 1.6.2) is an optional fallback.
 - HTTP uses the standard library (`urllib`), so there is no `requests` dependency
 
 ---
@@ -404,7 +404,7 @@ mind:
 In the [SDK repository](https://github.com/VelSigil/velsigil-sdks), from this folder:
 
 ```bash
-python -m pip install "cryptography>=48.0.1"
+python -m pip install "cryptography>=50.0.0"
 python -m unittest discover -s tests -t . -v
 ```
 

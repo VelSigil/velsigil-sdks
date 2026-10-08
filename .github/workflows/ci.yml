@@ -100,9 +100,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # requires-python ">=3.10" with the declared floor cryptography 48.0.1 ...
+          # requires-python ">=3.10" with the declared floor cryptography 50.0.0 ...
           - python: "3.10"
-            cryptography: "48.0.1 (floor)"
+            cryptography: "50.0.0 (floor)"
             requirements: .github/requirements-min/test-requirements-min.txt
           # ... and the newest supported Python with the newest cryptography.
           - python: "3.14"
@@ -137,7 +137,7 @@ jobs:
               meta = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
               text = z.read(meta).decode()
               names = z.namelist()
-          for needed in ("License-Expression: MIT", "Requires-Python: >=3.10", "Requires-Dist: cryptography>=48.0.1", "License-File: LICENSE"):
+          for needed in ("License-Expression: MIT", "Requires-Python: >=3.10", "Requires-Dist: cryptography>=50.0.0", "License-File: LICENSE"):
               assert needed in text, f"{needed!r} missing from {meta}"
           assert any(n.endswith("/licenses/LICENSE") for n in names), "LICENSE not in the wheel"
           assert any(n.endswith("velsigil_client/py.typed") for n in names), "py.typed not in the wheel"

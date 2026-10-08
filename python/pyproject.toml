@@ -33,11 +33,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
-# cryptography >= 48.0.1: the first release whose wheels bundle an OpenSSL without a published advisory
-# (GHSA-537c-gmf6-5ccf affects every version before it, and the Ed25519 checks of this SDK run in that OpenSSL).
-# The advisories still open against 48.x (X.509 path building / name constraints, PKCS#7 decryption) are in code
-# this SDK never calls. Raising the floor further only adds resolver conflicts for sellers' apps.
-dependencies = ["cryptography>=48.0.1"]
+# cryptography >= 50.0.0: the first release without a published advisory. 48.0.1 fixed the bundled OpenSSL
+# (GHSA-537c-gmf6-5ccf; the Ed25519 checks of this SDK run in that OpenSSL); 49.0.0 and 50.0.0 fixed X.509 path
+# building and name constraints (GHSA-jwv3-5hgf-82ww, GHSA-m2h6-j472-rp4c) and a PKCS#7 decryption oracle
+# (GHSA-g6cj-pr64-35w5). This SDK never calls that code, but a floor without known advisories keeps installs of the
+# SDK from pulling in a vulnerable cryptography (owner decision, 2026-10-08, before the first release).
+dependencies = ["cryptography>=50.0.0"]
 
 [project.optional-dependencies]
 # PyNaCl >= 1.6.2 bundles a libsodium with the fix for GHSA-mrfv-m5wm-5w6w (Ed25519 input validation).

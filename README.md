@@ -135,7 +135,7 @@ updates and verified downloads, thread safety and hardening.
 | SDK | Runtime / toolchain | Tested in CI |
 |---|---|---|
 | Node.js | Node.js 22 or newer (`engines: >=22`) | 22, 24 |
-| Python | CPython 3.10 to 3.14; `cryptography >= 48.0.1` (optional `PyNaCl >= 1.6.2`) | 3.10 with cryptography 48.0.1, 3.14 with the newest |
+| Python | CPython 3.10 to 3.14; `cryptography >= 50.0.0` (optional `PyNaCl >= 1.6.2`) | 3.10 with cryptography 50.0.0, 3.14 with the newest |
 | .NET | `net8.0` and `netstandard2.0` (.NET 8+, .NET Framework 4.7.2+, Mono, Unity 2021.3+) | Linux and Windows, both builds |
 | C++ | C++17, CMake 3.16+; MSVC 2019+, GCC 9+, Clang 10+, Apple Clang 12+ | GCC (Ubuntu, system packages), MSVC (Windows, vcpkg) |
 

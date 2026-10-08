@@ -165,7 +165,7 @@ class Ed25519Verifier:
             except Exception as exc:  # ImportError, or UnsupportedAlgorithm on old OpenSSL builds
                 last_error = exc
         raise CryptoBackendError(
-            "No Ed25519 backend available: install 'cryptography>=48.0.1' or 'PyNaCl>=1.6.2'"
+            "No Ed25519 backend available: install 'cryptography>=50.0.0' or 'PyNaCl>=1.6.2'"
         ) from last_error
 
     @property

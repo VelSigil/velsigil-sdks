@@ -6,8 +6,9 @@
 
 - Published from the public repository [VelSigil/velsigil-sdks](https://github.com/VelSigil/velsigil-sdks)
   (`python` folder) through PyPI trusted publishing with PEP 740 attestations.
-- `requires-python` is now `>=3.10` (was `>=3.8`); `cryptography>=48.0.1` (was `>=3.4`): the first release
-  whose wheels bundle an OpenSSL without a published advisory. The optional `nacl` extra needs
+- `requires-python` is now `>=3.10` (was `>=3.8`); `cryptography>=50.0.0` (was `>=3.4`): the first release
+  with no published advisory (the bundled OpenSSL of earlier wheels, and X.509 / PKCS#7 issues in 48.x and 49.x
+  that this SDK does not use but would otherwise let an install pull in). The optional `nacl` extra needs
   `PyNaCl>=1.6.2` (libsodium Ed25519 input-validation fix).
 - PEP 639 metadata: `license = "MIT"` with `license-files = ["LICENSE"]`; project URLs; the build backend is
   pinned (`setuptools==84.0.0`).
