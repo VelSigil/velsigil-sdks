@@ -1,0 +1,51 @@
+# Line endings, matching the panel repository's conventions: LF everywhere in the repository (CI runs on Linux,
+# Windows and macOS; package builds must not depend on the checkout's line endings), CRLF only for Windows-native
+# scripts.
+* text=auto eol=lf
+
+*.sh            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.toml          text eol=lf
+*.json          text eol=lf
+*.md            text eol=lf
+*.cs            text eol=lf
+*.csproj        text eol=lf
+*.props         text eol=lf
+*.config        text eol=lf
+*.cpp           text eol=lf
+*.hpp           text eol=lf
+*.in            text eol=lf
+CMakeLists.txt  text eol=lf
+
+# Windows-native scripts keep CRLF.
+*.ps1           text eol=crlf
+*.cmd           text eol=crlf
+*.bat           text eol=crlf
+
+# Lock files: generated, never merged by hand.
+node/package-lock.json                  text eol=lf -diff linguist-generated=true
+csharp/**/packages.lock.json            text eol=lf -diff linguist-generated=true
+
+# Generated from the server's signing code (panel repository); never rewritten by tooling here.
+test-vectors.json  text eol=lf linguist-generated=true
+
+# Not part of the C++ source tarball (git archive, .github/scripts/cpp-source-tarball.sh) nor of any package.
+/.github        export-ignore
+/.gitattributes export-ignore
+/.gitignore     export-ignore
+
+# Binary assets.
+*.png    binary
+*.jpg    binary
+*.gif    binary
+*.ico    binary
+*.zip    binary
+*.gz     binary
+*.tgz    binary
+*.whl    binary
+*.nupkg  binary
+*.snupkg binary
+*.dll    binary
+*.exe    binary
+*.pdb    binary

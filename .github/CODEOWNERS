@@ -1,0 +1,11 @@
+# Code owners: GitHub requests their review on every pull request. Requiring code-owner review in the main ruleset
+# only makes sense once a second maintainer exists (docs/RELEASING.md, section 2): GitHub never lets you approve your
+# own pull request.
+*                       @VelSigil
+
+# Release machinery and supply-chain settings: the same owner, listed explicitly so they stay owned if the default
+# line above is ever narrowed.
+/.github/               @VelSigil
+/.github/workflows/     @VelSigil
+/csharp/global.json     @VelSigil
+/csharp/nuget.config    @VelSigil

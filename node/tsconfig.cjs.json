@@ -1,0 +1,15 @@
+{
+  // CommonJS build -> dist/cjs. scripts/build.mjs adds dist/cjs/package.json ({"type":"commonjs"})
+  // so Node and TypeScript treat these .js/.d.ts files as CommonJS.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "bundler",
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist/cjs",
+    "declaration": true,
+    "removeComments": false
+  },
+  "include": ["src"]
+}

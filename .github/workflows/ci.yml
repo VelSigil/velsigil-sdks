@@ -1,0 +1,334 @@
+# CI for the four SDKs: Node.js, Python, .NET and C++ tests, the shared test vectors, package builds that mirror
+# release.yml, and zizmor over the workflows.
+#
+# Supply chain: every action is pinned to a full commit SHA (the comment names its release; Dependabot updates both
+# together), the workflow token is read-only, checkouts keep no credentials, no job uses a cache, and every
+# dependency comes from a committed lock file (package-lock.json, packages.lock.json in locked mode, hash-pinned pip
+# requirements, the vcpkg baseline in cpp/vcpkg.json).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+# No job reads or writes the Actions cache (a push to main would otherwise get cache write access).
+cache-mode: none
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NPM_CONFIG_AUDIT: "false"
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_UPDATE_NOTIFIER: "false"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------------------------------------------
+  consistency:
+    name: Versions and shared test vectors
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Every SDK carries the same version (node, python, csharp, cpp)
+        run: node .github/scripts/check-versions.mjs
+      - name: test-vectors.json is in generated form, its signatures match "expect", and every suite reads it
+        run: node .github/scripts/check-vectors.mjs
+
+  # ---------------------------------------------------------------------------------------------------------------
+  node:
+    name: Node.js ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # engines.node is ">=22": the minimum and the current LTS lines.
+        node: ["22", "24"]
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: npm ci (exact lock, no install scripts)
+        run: npm ci --ignore-scripts
+      - name: Registry signatures and provenance of the installed dev dependencies
+        if: matrix.node == '24'
+        run: npm audit signatures
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Package contents (what npm would publish)
+        run: npm pack --dry-run --ignore-scripts
+
+  # ---------------------------------------------------------------------------------------------------------------
+  python:
+    name: Python ${{ matrix.python }} (cryptography ${{ matrix.cryptography }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # requires-python ">=3.10" with the declared floor cryptography 48.0.1 ...
+          - python: "3.10"
+            cryptography: "48.0.1 (floor)"
+            requirements: .github/requirements-min/test-requirements-min.txt
+          # ... and the newest supported Python with the newest cryptography.
+          - python: "3.14"
+            cryptography: "latest pinned"
+            requirements: .github/requirements/test-requirements-latest.txt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test dependencies (hash-pinned)
+        env:
+          REQUIREMENTS: ${{ matrix.requirements }}
+        run: python -m pip install --require-hashes -r "$REQUIREMENTS"
+      - name: unittest (vectors, client against the local signing mock server)
+        working-directory: python
+        run: python -m unittest discover -s tests -t . -v
+      - name: Build sdist + wheel as release.yml does, and check the metadata
+        if: matrix.python == '3.14'
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r .github/requirements/build-requirements.txt
+          python -m build --no-isolation --sdist --wheel --outdir "$RUNNER_TEMP/pydist" python
+          ls -l "$RUNNER_TEMP/pydist"
+          python - "$RUNNER_TEMP/pydist" <<'PY'
+          import pathlib, sys, zipfile
+          dist = pathlib.Path(sys.argv[1])
+          wheel = next(dist.glob("velsigil_client-*-py3-none-any.whl"))
+          with zipfile.ZipFile(wheel) as z:
+              meta = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+              text = z.read(meta).decode()
+              names = z.namelist()
+          for needed in ("License-Expression: MIT", "Requires-Python: >=3.10", "Requires-Dist: cryptography>=48.0.1", "License-File: LICENSE"):
+              assert needed in text, f"{needed!r} missing from {meta}"
+          assert any(n.endswith("/licenses/LICENSE") for n in names), "LICENSE not in the wheel"
+          assert any(n.endswith("velsigil_client/py.typed") for n in names), "py.typed not in the wheel"
+          print(f"{wheel.name}: metadata OK")
+          PY
+          python -m pip install --no-deps --no-index "$RUNNER_TEMP"/pydist/velsigil_client-*-py3-none-any.whl
+          (cd "$RUNNER_TEMP" && python -c "import velsigil_client; print('import OK', velsigil_client.__version__)")
+
+  # ---------------------------------------------------------------------------------------------------------------
+  csharp:
+    name: .NET (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: csharp
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          # The exact SDK the committed packages.lock.json files were generated with.
+          global-json-file: csharp/global.json
+      - name: dotnet restore (locked mode, nuget.org only via package source mapping)
+        run: dotnet restore Velsigil.Client.sln --locked-mode
+      - name: dotnet build (netstandard2.0 + net8.0)
+        run: dotnet build Velsigil.Client.sln -c Release --no-restore
+      - name: dotnet test (against the net8.0 build)
+        run: dotnet test tests/Velsigil.Client.Tests -c Release --no-build
+      - name: dotnet test (against the netstandard2.0 build)
+        run: dotnet test tests/Velsigil.Client.Tests -c Release --no-restore -p:VelsigilTestNetStandard=true
+      - name: dotnet pack (.nupkg + .snupkg with Source Link), as release.yml does
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          dotnet pack src/Velsigil.Client -c Release --no-restore -o "$RUNNER_TEMP/nupkg"
+          ls -l "$RUNNER_TEMP/nupkg"
+          unzip -p "$RUNNER_TEMP"/nupkg/Velsigil.Client.*.nupkg Velsigil.Client.nuspec | tee "$RUNNER_TEMP/nuspec.xml"
+          grep -qiE '<repository type="git" url="https://github.com/VelSigil/velsigil-sdks(\.git)?" commit="[0-9a-f]{40}"' "$RUNNER_TEMP/nuspec.xml" \
+            || { echo "::error::the .nuspec lacks the repository URL + commit (Source Link / PublishRepositoryUrl)"; exit 1; }
+          grep -q '<license type="expression">MIT</license>' "$RUNNER_TEMP/nuspec.xml" || { echo "::error::license expression missing"; exit 1; }
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # C++: the SDK has never been compiled before this repository existed (no compiler on the development machine).
+  # Each phase is its own step so a failure names the phase; compiler errors are all shown at once (-k 0), and the
+  # CMake/CTest logs are uploaded as an artifact when anything fails.
+  cpp-linux:
+    name: C++ (Ubuntu, system packages, GCC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install build dependencies (apt) and the mock server's Python dependencies (hash-pinned)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config g++ libcurl4-openssl-dev libsodium-dev nlohmann-json3-dev
+          python -m pip install --require-hashes -r .github/requirements/test-requirements-latest.txt
+      - name: Toolchain and dependency versions
+        run: |
+          cmake --version | head -n1; ninja --version; g++ --version | head -n1
+          pkg-config --modversion libcurl libsodium
+          dpkg-query -W -f='${Package} ${Version}\n' nlohmann-json3-dev
+          python --version
+      - name: Configure (cpp/)
+        run: |
+          cmake -S cpp -B build/cpp -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVX_BUILD_TESTS=ON -DVX_BUILD_HTTP_TESTS=ON -DPython3_EXECUTABLE="$(command -v python)"
+      - name: Build (library, example, tests; all compiler errors at once)
+        run: cmake --build build/cpp -- -k 0
+      - name: Test (vectors, client behaviour, libcurl against the mock server)
+        run: ctest --test-dir build/cpp --output-on-failure --timeout 300
+      - name: Install, then build an application with find_package(velsigil)
+        run: |
+          set -euo pipefail
+          cmake --install build/cpp --prefix "$RUNNER_TEMP/velsigil-prefix"
+          find "$RUNNER_TEMP/velsigil-prefix" -type f | sort
+          cmake -S cpp/tests/package_consumer -B build/consumer-find -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/velsigil-prefix"
+          cmake --build build/consumer-find
+          ctest --test-dir build/consumer-find --output-on-failure
+      - name: Release source tarball, then build an application with FetchContent from it
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./cpp/vcpkg.json').version")"
+          tarball="$(bash .github/scripts/cpp-source-tarball.sh "$version" "$RUNNER_TEMP/cpp-dist")"
+          sha="$(sha256sum "$tarball" | cut -d' ' -f1)"
+          tar -tzf "$tarball" | head -n 20
+          cmake -S cpp/tests/package_consumer -B build/consumer-fetch -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVELSIGIL_CONSUMER_MODE=fetchcontent -DVELSIGIL_URL="$tarball" -DVELSIGIL_URL_HASH="SHA256=$sha"
+          cmake --build build/consumer-fetch
+          ctest --test-dir build/consumer-fetch --output-on-failure
+          # Deterministic: a second tarball from the same commit has the same hash.
+          again="$(bash .github/scripts/cpp-source-tarball.sh "$version" "$RUNNER_TEMP/cpp-dist-2")"
+          [[ "$(sha256sum "$again" | cut -d' ' -f1)" == "$sha" ]] || { echo "::error::the source tarball is not reproducible"; exit 1; }
+      - name: Upload CMake/CTest logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cpp-linux-logs
+          path: |
+            build/**/CMakeCache.txt
+            build/**/CMakeFiles/CMakeConfigureLog.yaml
+            build/**/CMakeFiles/CMakeError.log
+            build/**/Testing/Temporary/LastTest*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  cpp-windows:
+    name: C++ (Windows, MSVC, vcpkg at the pinned baseline)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: vcpkg at the builtin-baseline of cpp/vcpkg.json (not the runner's preinstalled copy)
+        run: |
+          $baseline = (Get-Content cpp/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if ($baseline -notmatch '^[0-9a-f]{40}$') { Write-Output "::error::cpp/vcpkg.json has no builtin-baseline commit"; exit 1 }
+          $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git clone --quiet https://github.com/microsoft/vcpkg.git $root
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $root -c advice.detachedHead=false checkout --quiet $baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $root 'bootstrap-vcpkg.bat') -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & (Join-Path $root 'vcpkg.exe') version
+      - name: Configure (cpp/, x64-windows; vcpkg builds curl, libsodium, nlohmann-json)
+        run: |
+          cmake -S cpp -B build/cpp `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows -DVX_BUILD_TESTS=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (Release)
+        run: |
+          cmake --build build/cpp --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test
+        run: |
+          ctest --test-dir build/cpp -C Release --output-on-failure --timeout 300
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload CMake, CTest and vcpkg logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cpp-windows-logs
+          path: |
+            build/**/CMakeCache.txt
+            build/**/CMakeFiles/CMakeConfigureLog.yaml
+            build/**/vcpkg-manifest-install.log
+            build/**/Testing/Temporary/LastTest*.log
+            ${{ runner.temp }}/vcpkg/buildtrees/**/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------------------------------------
+  zizmor:
+    name: Workflow security (zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: zizmor (workflows, actions and dependabot.yml)
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: "1.30.1"
+          advanced-security: false
+          annotations: true

@@ -1,0 +1,71 @@
+# Dependencies, build output and local state of all four SDKs. Nothing generated is ever committed: releases are
+# built by .github/workflows/release.yml from the committed sources and lock files.
+
+# Secrets: never in this repository (the SDKs need none; publishing uses OIDC trusted publishing)
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+*.snk
+.npmrc
+.pypirc
+
+# Node.js (node/)
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.tgz
+npm-debug.log*
+
+# Python (python/)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.whl
+
+# .NET (csharp/)
+bin/
+obj/
+TestResults/
+nupkgs/
+*.nupkg
+*.snupkg
+*.user
+*.suo
+.vs/
+
+# C++ (cpp/)
+build*/
+out/
+vcpkg_installed/
+CMakeUserPresets.json
+compile_commands.json
+.cmake/
+
+# Release scratch
+/release-dist/
+/attestation/
+/pypi-dist/
+SHA256SUMS
+*.cdx.json
+*.sigstore.json
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

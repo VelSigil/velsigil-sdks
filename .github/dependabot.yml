@@ -1,0 +1,44 @@
+# Weekly updates of this repository's own release machinery only: the pinned GitHub Actions and the hash-pinned
+# Python build/test requirements under .github/requirements. Minor and patch updates are grouped into one pull request
+# per ecosystem; major updates arrive individually. Every ecosystem has a 7-day cooldown: a brand-new release is only
+# proposed after it has been public for a week (compromised releases are usually pulled sooner; zizmor's
+# dependabot-cooldown audit also expects at least 7 days).
+#
+# Not covered here, on purpose (docs/RELEASING.md, section 7):
+#   - node/, python/, csharp/, cpp/ and test-vectors.json are exported from the private source repository, where
+#     their dependencies are updated (its own Dependabot). A version update merged here would be undone by the next
+#     export. Dependabot ALERTS for those folders still work (Settings > Code security); fix them at the source.
+#   - .github/requirements-min (the declared minimum versions) and setuptools in build-requirements.txt (it must
+#     equal the pin in python/pyproject.toml, which changes at the source).
+version: 2
+
+updates:
+  # Python build tools and test dependencies used by ci.yml and release.yml (hash-pinned requirement files).
+  - package-ecosystem: pip
+    directory: "/.github/requirements"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: setuptools
+    groups:
+      pip-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Actions are pinned by commit SHA with a "# vX.Y.Z" comment; Dependabot keeps SHA and comment in sync.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]

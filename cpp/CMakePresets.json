@@ -1,0 +1,42 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "vcpkg",
+      "displayName": "vcpkg manifest (default triplet)",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "vcpkg-windows-static",
+      "displayName": "vcpkg manifest, x64-windows-static (no DLLs, static CRT)",
+      "inherits": "vcpkg",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "system",
+      "displayName": "System packages (apt / brew / pkg-config)",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "vcpkg", "configurePreset": "vcpkg", "configuration": "Release" },
+    { "name": "vcpkg-windows-static", "configurePreset": "vcpkg-windows-static", "configuration": "Release" },
+    { "name": "system", "configurePreset": "system", "configuration": "Release" }
+  ],
+  "testPresets": [
+    { "name": "vcpkg", "configurePreset": "vcpkg", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "vcpkg-windows-static", "configurePreset": "vcpkg-windows-static", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "system", "configurePreset": "system", "configuration": "Release", "output": { "outputOnFailure": true } }
+  ]
+}

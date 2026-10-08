@@ -1,0 +1,13 @@
+<Project>
+  <!-- Applies to every project under sdks/csharp (the SDK, its tests and the example). -->
+  <PropertyGroup>
+    <!--
+      Each project commits its packages.lock.json (exact versions + SHA-512 content hashes of every direct and
+      transitive package). CI and release builds restore in locked mode (dotnet restore with the locked-mode
+      switch), which fails instead of silently resolving something else. After changing a PackageReference or the
+      SDK version in global.json, run "dotnet restore" with the force-evaluate switch in this folder and commit
+      the updated lock files (RELEASING.md in the SDK repository).
+    -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+</Project>

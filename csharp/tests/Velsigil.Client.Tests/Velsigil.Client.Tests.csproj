@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <WarningsAsErrors>$(WarningsAsErrors);nullable</WarningsAsErrors>
+    <RootNamespace>Velsigil.Client.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    By default the tests run against the net8.0 build of the SDK. Pass -p:VelsigilTestNetStandard=true to run
+    the same suite against the netstandard2.0 build (the asset .NET Framework 4.7.2+ and Unity consume).
+  -->
+  <PropertyGroup Condition="'$(VelsigilTestNetStandard)' == 'true'">
+    <DefineConstants>$(DefineConstants);VELSIGIL_NETSTANDARD</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(VelsigilTestNetStandard)' != 'true'">
+    <ProjectReference Include="..\..\src\Velsigil.Client\Velsigil.Client.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(VelsigilTestNetStandard)' == 'true'">
+    <ProjectReference Include="..\..\src\Velsigil.Client\Velsigil.Client.csproj" SetTargetFramework="TargetFramework=netstandard2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The canonical cross-SDK vectors (sdks/test-vectors.json); never copied or edited by hand. -->
+    <Content Include="..\..\..\test-vectors.json" Link="test-vectors.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

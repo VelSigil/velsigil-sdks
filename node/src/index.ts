@@ -1,0 +1,69 @@
+/**
+ * velsigil-client - official Node.js SDK for the Velsigil license server.
+ *
+ * @example
+ * ```ts
+ * import { VelsigilClient, FileStore, defaultStoreDirectory } from 'velsigil-client';
+ *
+ * const client = new VelsigilClient(API_URL, PRODUCT_ID, PUBLIC_KEY, {
+ *   store: new FileStore(defaultStoreDirectory('MyApp')),
+ * });
+ * const result = await client.validateWithOfflineFallback(licenseKey, { version: '1.2.0' });
+ * if (!result.ok) exitWith(result.code);
+ * ```
+ */
+export { VelsigilClient, type StartTrialOptions, type ValidateOptions, type VelsigilClientOptions } from './client.js';
+export {
+  VelsigilResult,
+  type ActivationInfo,
+  type DownloadInfo,
+  type LeaseInfo,
+  type LicenseInfo,
+  type UpdateInfo,
+} from './result.js';
+export {
+  LEASE_REVOKING_CODES,
+  SDK_CODES,
+  SERVER_CODES,
+  UNSIGNED_ERROR_CODES,
+  type SdkCode,
+  type ServerCode,
+  type UnsignedErrorCode,
+  type VelsigilCode,
+} from './codes.js';
+export { VelsigilError, type VelsigilErrorCode } from './errors.js';
+export {
+  FileStore,
+  MemoryStore,
+  defaultStoreDirectory,
+  type StoredLease,
+  type StoredState,
+  type VelsigilStore,
+} from './store.js';
+export {
+  verifyEnvelope,
+  type EnvelopeExpectations,
+  type EnvelopeStatus,
+  type EnvelopeVerification,
+} from './envelope.js';
+export { verifyLease, type LeaseExpectations, type LeaseStatus, type LeaseVerification } from './lease.js';
+export { HWID_PREFIX, getHardwareId, hwidFromMachineId } from './hwid.js';
+export { parsePublicKey } from './signature.js';
+export { TRIAL_REF_PARAM, withTrialRef } from './trial-ref.js';
+export type { DownloadFileCode, DownloadFileOptions, DownloadFileResult } from './download.js';
+export type { FetchFunction } from './http.js';
+export type {
+  ActivationStatus,
+  LeasePayload,
+  LicenseStatus,
+  ProtocolActivation,
+  ProtocolDownload,
+  ProtocolLease,
+  ProtocolLicense,
+  ProtocolTrial,
+  ProtocolUpdate,
+  RequestType,
+  ResponsePayload,
+  SignedEnvelope,
+} from './types.js';
+export { SDK_VERSION } from './version.js';

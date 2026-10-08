@@ -1,0 +1,5 @@
+build/
+out/
+vcpkg_installed/
+CMakeUserPresets.json
+__pycache__/

@@ -1,0 +1,24 @@
+{
+  // Type-checking configuration for sources, tests and tooling (no emit).
+  // The build uses tsconfig.esm.json and tsconfig.cjs.json, which extend this file.
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "newLine": "lf",
+    "noEmit": true
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}
