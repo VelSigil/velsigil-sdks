@@ -1,6 +1,6 @@
 # Changelog - Velsigil Python SDK (`velsigil-client`)
 
-## 1.0.0 (unreleased)
+## 1.0.0 (2026-10-08)
 
 ### Packaging and distribution (2026-10-07)
 
@@ -13,7 +13,7 @@
 - PEP 639 metadata: `license = "MIT"` with `license-files = ["LICENSE"]`; project URLs; the build backend is
   pinned (`setuptools==84.0.0`).
 
-Nothing has been published yet, so the version stays 1.0.0. Changes made on 2026-10-06 that affect code
+Changes made on 2026-10-06, before the first release (so the version stays 1.0.0), that affect code
 written against earlier source snapshots:
 
 ### Breaking (low-level API)

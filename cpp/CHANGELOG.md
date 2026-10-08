@@ -1,6 +1,6 @@
 # Changelog - Velsigil C++ SDK (`velsigil`)
 
-## 1.0.0 (unreleased)
+## 1.0.0 (2026-10-08)
 
 ### Packaging and distribution (2026-10-07)
 
@@ -12,7 +12,7 @@
   `../test-vectors.json`; `cmake --install` also installs `LICENSE`, `README.md` and `CHANGELOG.md` to the doc
   directory. `tests/package_consumer` checks `find_package` and `FetchContent` consumption in CI.
 
-Nothing has been published yet, so the version stays 1.0.0. Changes made on 2026-10-06 that affect code
+Changes made on 2026-10-06, before the first release (so the version stays 1.0.0), that affect code
 written against earlier source snapshots:
 
 ### Breaking (low-level API)

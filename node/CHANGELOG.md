@@ -1,6 +1,6 @@
 # Changelog - Velsigil Node.js SDK (`velsigil-client`)
 
-## 1.0.0 (unreleased)
+## 1.0.0 (2026-10-08)
 
 ### Packaging and distribution (2026-10-07)
 

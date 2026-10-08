@@ -1,6 +1,6 @@
 # Changelog - Velsigil .NET SDK (`Velsigil.Client`)
 
-## 1.0.0 (unreleased)
+## 1.0.0 (2026-10-08)
 
 ### Packaging and distribution (2026-10-07)
 
