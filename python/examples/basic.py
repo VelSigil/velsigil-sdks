@@ -149,12 +149,17 @@ def main() -> int:
     result = client.validate_with_offline_fallback(license_key, version=APP_VERSION)
     if not result.ok:
         print(FRIENDLY.get(result.code, result.message), "[%s]" % result.code)
+        if result.retry_after is not None:  # the server's Retry-After (429 or 503)
+            print("Try again in %d s." % result.retry_after)
         if result.request_id:
             print("Support reference: %s" % result.request_id)
         return 1
 
     lic = result.license
     print("License OK%s - plan %s" % (" (offline lease)" if result.offline else "", lic.plan if lic else "?"))
+    if result.offline and result.retry_after is not None:
+        # The server answered 503 with Retry-After (e.g. its database is unreachable): when to try online again.
+        print("The license server asks to retry in %d s." % result.retry_after)
     if result.is_lifetime:
         print("Never expires.")
     elif result.expires_at is not None:

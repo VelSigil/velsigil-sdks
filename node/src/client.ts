@@ -407,11 +407,15 @@ export class VelsigilClient {
    * `invalid_response` (for example a bad signature). When the fallback finds no usable lease, the result is
    * `lease_expired` or `lease_invalid` for an unusable stored lease, and the original online result (`network_error`,
    * `internal_error`, ...) when none is stored.
+   *
+   * A result of the fallback (offline `ok`, `lease_expired`, `lease_invalid`) carries the `retryAfter` of the failed
+   * online attempt (the `Retry-After` of a 503, e.g. 30 s while the server's database is unreachable), so the app knows
+   * when to try online again; null when that answer had none.
    */
   async validateWithOfflineFallback(licenseKey: string, options: ValidateOptions = {}): Promise<VelsigilResult> {
     const online = await this.#validateOnline(licenseKey, options);
     if (!online.unavailable) return online.result;
-    const offline = await this.validateOffline();
+    const offline = await this.#deviceLock.run(() => this.#validateOfflineUnlocked(online.result.retryAfter));
     // Without any stored lease the original failure (network_error, internal_error, ...) is the more useful answer.
     return offline.code === 'no_lease' ? online.result : offline;
   }
@@ -509,7 +513,13 @@ export class VelsigilClient {
     if (outcome.kind === 'too_large') {
       return {
         payload: null,
-        result: localFailure('invalid_response', 'The server response is too large.', type),
+        result: new VelsigilResult({
+          ok: false,
+          code: 'invalid_response',
+          message: 'The server response is too large.',
+          type,
+          retryAfter: this.#retryAfter(outcome.status, outcome.headers),
+        }),
         // An oversized error page on a 5xx is still an unsigned 5xx (the server is unavailable).
         unavailable: isServerErrorStatus(outcome.status),
       };
@@ -588,8 +598,19 @@ export class VelsigilClient {
       message,
       type,
       requestId,
-      retryAfter: code === 'rate_limited' ? parseRetryAfter(headers.get('retry-after'), this.#clock()) : null,
+      retryAfter: this.#retryAfter(status, headers),
     });
+  }
+
+  /**
+   * The `Retry-After` of an HTTP 429 or 503 answer in seconds, whatever code the answer maps to (`rate_limited`;
+   * `network_error` for the empty 503 of a server whose database is unreachable or a gateway's 503; the code of a
+   * Velsigil error body such as 503 `service_busy`; CLIENT_PROTOCOL 5.3, identical in every Velsigil SDK). Null for
+   * every other status and when the header is absent or unparseable.
+   */
+  #retryAfter(status: number, headers: Headers): number | null {
+    if (status !== 429 && status !== 503) return null;
+    return parseRetryAfter(headers.get('retry-after'), this.#clock());
   }
 
   #resultFromPayload(payload: ResponsePayload): VelsigilResult {
@@ -674,9 +695,14 @@ export class VelsigilClient {
     if (changed) await this.#saveState(next);
   }
 
-  async #validateOfflineUnlocked(): Promise<VelsigilResult> {
+  /**
+   * `retryAfter`: the `Retry-After` of the failed online attempt when {@link validateWithOfflineFallback} falls back,
+   * copied onto the offline result; null for a direct {@link validateOffline}.
+   */
+  async #validateOfflineUnlocked(retryAfter: number | null = null): Promise<VelsigilResult> {
     const { state } = await this.#loadState();
     if (state.lease === null) {
+      // Never returned by the fallback (it then reports the online result), so it carries no retryAfter.
       return new VelsigilResult({ ok: false, code: 'no_lease', message: 'No offline lease is stored.', offline: true });
     }
     const now = this.#serverNowSeconds();
@@ -686,7 +712,7 @@ export class VelsigilClient {
       now,
     });
     if (check.status === 'valid') {
-      return leaseResult(check.payload, state.lease.token, now);
+      return leaseResult(check.payload, state.lease.token, now, retryAfter);
     }
     if (check.status === 'expired') {
       return new VelsigilResult({
@@ -695,6 +721,7 @@ export class VelsigilClient {
         message: 'The offline lease has expired. Connect to the internet to validate the license.',
         offline: true,
         lease: { token: state.lease.token, expiresAt: check.payload.exp },
+        retryAfter,
       });
     }
     // Tampered, foreign or corrupt lease: drop it so it is never considered again.
@@ -704,6 +731,7 @@ export class VelsigilClient {
       code: 'lease_invalid',
       message: `The stored offline lease is not valid: ${check.reason}.`,
       offline: true,
+      retryAfter,
     });
   }
 
@@ -887,8 +915,11 @@ function licenseInfo(license: ProtocolLicense): LicenseInfo {
   };
 }
 
-/** `now`: the time of the offline check (unix seconds, local clock + learned offset); the result's reference time. */
-function leaseResult(payload: LeasePayload, token: string, now: number): VelsigilResult {
+/**
+ * `now`: the time of the offline check (unix seconds, local clock + learned offset); the result's reference time.
+ * `retryAfter`: the failed online attempt's `Retry-After` when the offline fallback produced it (else null).
+ */
+function leaseResult(payload: LeasePayload, token: string, now: number, retryAfter: number | null): VelsigilResult {
   const license: LicenseInfo = {
     id: payload.licenseId,
     plan: payload.plan,
@@ -917,6 +948,7 @@ function leaseResult(payload: LeasePayload, token: string, now: number): Velsigi
     activation,
     lease: { token, expiresAt: payload.exp },
     offline: true,
+    retryAfter,
     referenceTime: now,
   });
 }

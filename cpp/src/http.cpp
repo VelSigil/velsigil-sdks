@@ -100,6 +100,37 @@ std::size_t write_body(char* ptr, std::size_t size, std::size_t nmemb, void* use
   return length;
 }
 
+// A Retry-After value is a number of seconds or an HTTP-date of at most 33 characters; a longer one is not used.
+constexpr std::size_t kMaxRetryAfterBytes = 128;
+
+// libcurl header callback of post_json: keeps the raw `Retry-After` value of the final response (the Client
+// parses it, see ValidationResult::retry_after). libcurl passes the header lines of every response it reads (a
+// proxy's CONNECT answer, an interim 100 Continue), so each status line starts over; of repeated headers the last
+// one counts. Must not let exceptions escape into C code.
+std::size_t read_header(char* buffer, std::size_t size, std::size_t nitems, void* userdata) {
+  auto* retry_after = static_cast<std::optional<std::string>*>(userdata);
+  if (size != 0 && nitems > (std::numeric_limits<std::size_t>::max)() / size) return 0;
+  const std::size_t length = size * nitems;
+  const std::string_view line(buffer, length);
+  if (line.compare(0, 5, "HTTP/") == 0) {
+    retry_after->reset();
+    return length;
+  }
+  const std::size_t colon = line.find(':');
+  if (colon == std::string_view::npos || !equals_ignore_case(line.substr(0, colon), "Retry-After")) return length;
+  std::string_view value = line.substr(colon + 1);
+  auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+  while (!value.empty() && is_space(value.front())) value.remove_prefix(1);
+  while (!value.empty() && is_space(value.back())) value.remove_suffix(1);
+  try {
+    // An over-long value is kept as an empty one: unparseable, so no retry_after.
+    *retry_after = value.size() <= kMaxRetryAfterBytes ? std::string(value) : std::string();
+  } catch (...) {
+    retry_after->reset();
+  }
+  return length;
+}
+
 struct FileSink {
   std::ofstream* out = nullptr;
   Sha256Stream* hash = nullptr;
@@ -162,6 +193,7 @@ HttpResponse CurlTransport::post_json(const std::string& url, const std::string&
   HeaderList headers(raw_headers);
 
   BodySink sink;
+  std::optional<std::string> retry_after;
   const long timeout_ms = to_curl_millis(timeout);
   CURL* h = handle.get();
   const bool configured = configure_common(h, url, timeout_ms, user_agent_) &&
@@ -171,7 +203,9 @@ HttpResponse CurlTransport::post_json(const std::string& url, const std::string&
                           curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.size())) == CURLE_OK &&
                           curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers.get()) == CURLE_OK &&
                           curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, &write_body) == CURLE_OK &&
-                          curl_easy_setopt(h, CURLOPT_WRITEDATA, static_cast<void*>(&sink)) == CURLE_OK;
+                          curl_easy_setopt(h, CURLOPT_WRITEDATA, static_cast<void*>(&sink)) == CURLE_OK &&
+                          curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, &read_header) == CURLE_OK &&
+                          curl_easy_setopt(h, CURLOPT_HEADERDATA, static_cast<void*>(&retry_after)) == CURLE_OK;
   if (!configured) {
     response.error = "the HTTP request could not be configured";
     return response;
@@ -183,9 +217,11 @@ HttpResponse CurlTransport::post_json(const std::string& url, const std::string&
 
   if (code != CURLE_OK) {
     if (sink.overflow && status != 0) {
-      // An oversized body is dropped; the empty body is then rejected as an invalid response.
+      // An oversized body is dropped; the empty body is then rejected as an invalid response. Its headers (all
+      // read before the body) still count: an oversized 429 or 503 keeps its Retry-After.
       response.transport_ok = true;
       response.status = status;
+      response.retry_after = std::move(retry_after);
       return response;
     }
     response.error = describe_failure(code);
@@ -194,6 +230,7 @@ HttpResponse CurlTransport::post_json(const std::string& url, const std::string&
   response.transport_ok = true;
   response.status = status;
   response.body = std::move(sink.data);
+  response.retry_after = std::move(retry_after);
   return response;
 }
 

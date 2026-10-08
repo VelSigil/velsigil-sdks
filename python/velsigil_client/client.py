@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import datetime
 import functools
 import hashlib
 import hmac
 import http.client
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -31,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TypeVar
 
 from .crypto import (
@@ -61,7 +64,7 @@ from .models import (
 )
 from .store import LicenseStore, MemoryStore, StoredState
 
-SDK_VERSION = "1.0.3"
+SDK_VERSION = "1.0.4"
 
 API_PATH = "/api/client/v1"
 DEFAULT_TIMEOUT = 15.0
@@ -95,6 +98,10 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}\Z")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 #: A license key as the server issues it: 1-64 printable ASCII characters.
 _TRIAL_KEY_RE = re.compile(r"^[\x21-\x7e]{1,64}\Z")
+#: ``Retry-After`` as delta-seconds (ASCII digits only; ``str.isdigit`` would accept other digits).
+_DELTA_SECONDS_RE = re.compile(r"^[0-9]+\Z")
+#: Upper bound of ``VelsigilResult.retry_after``: one day.
+_MAX_RETRY_AFTER = 86400
 
 #: Signed denials after which a stored offline lease must no longer be used.
 #: This exact set is binding for every Velsigil SDK (SPEC 14); any other
@@ -166,12 +173,14 @@ class _NetworkFailure(Exception):
 class _ResponseTooLarge(Exception):
     """The response body exceeded :data:`MAX_RESPONSE_BYTES`.
 
-    ``status`` is the HTTP status of that response (``None`` when unknown).
+    ``status`` and ``headers`` are those of that response (``None`` when
+    unknown): an oversized 429 or 503 still carries its ``Retry-After``.
     """
 
-    def __init__(self, status: Optional[int] = None) -> None:
+    def __init__(self, status: Optional[int] = None, headers: Any = None) -> None:
         super().__init__()
         self.status = status
+        self.headers = headers
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -608,14 +617,20 @@ class VelsigilClient:
         stored lease that cannot be used (kept or removed exactly as by
         :meth:`validate_offline`), and the original online failure
         (``network_error``, ``internal_error``, ...) when no lease is stored at
-        all, not ``no_lease``. :meth:`validate` itself never falls back.
+        all, not ``no_lease``. A result of the fallback (``ok`` offline,
+        ``lease_expired``, ``lease_invalid``) carries the ``retry_after`` of the
+        failed online attempt (the ``Retry-After`` of a 503, else ``None``), so
+        the app knows when to try online again. :meth:`validate` itself never
+        falls back.
         """
         online = self.validate(license_key, version=version, device_name=device_name)
         if not _server_unavailable(online):
             return online
         offline = self.validate_offline()
         # Without any stored lease the original failure (network_error, internal_error, ...) is more useful.
-        return online if offline.code == Code.NO_LEASE else offline
+        if offline.code == Code.NO_LEASE:
+            return online
+        return dataclasses.replace(offline, retry_after=online.retry_after)
 
     def clear_stored_state(self) -> None:
         """Forget the stored device secret and offline lease for this product."""
@@ -750,10 +765,18 @@ class VelsigilClient:
         except _ResponseTooLarge as exc:
             # The status is kept: an oversized 5xx (e.g. a proxy error page) is still an unsigned 5xx
             # answer, which lets validate_with_offline_fallback use the stored lease.
-            return _failure(Code.INVALID_RESPONSE, "The server response is too large.", http_status=exc.status), None
+            return (
+                _failure(
+                    Code.INVALID_RESPONSE,
+                    "The server response is too large.",
+                    http_status=exc.status,
+                    retry_after=_retry_after(exc.status, exc.headers, float(self._clock())),
+                ),
+                None,
+            )
 
         if status != 200:
-            return _unsigned_error(status, raw, headers, response_type), None
+            return _unsigned_error(status, raw, headers, response_type, now=float(self._clock())), None
 
         try:
             envelope = json.loads(raw.decode("utf-8"))
@@ -799,7 +822,7 @@ class VelsigilClient:
                 try:
                     raw = _read_capped(err, deadline) if getattr(err, "fp", None) is not None else b""
                 except _ResponseTooLarge:
-                    raise _ResponseTooLarge(err.code) from None
+                    raise _ResponseTooLarge(err.code, err.headers) from None
                 finally:
                     err.close()
                 return err.code, raw, err.headers
@@ -808,7 +831,7 @@ class VelsigilClient:
                 try:
                     return status, _read_capped(response, deadline), response.headers
                 except _ResponseTooLarge:
-                    raise _ResponseTooLarge(status) from None
+                    raise _ResponseTooLarge(status, response.headers) from None
         except _ResponseTooLarge:
             raise
         except (socket.timeout, TimeoutError):
@@ -1050,14 +1073,39 @@ def _sanitize_request_id(value: Any) -> Optional[str]:
     return None
 
 
-def _retry_after(headers: Any) -> Optional[int]:
+def _retry_after(status: Optional[int], headers: Any, now: float) -> Optional[int]:
+    """Seconds to wait from the ``Retry-After`` header of an HTTP 429 or 503 answer (SPEC 14, every SDK).
+
+    Every 429 and 503 counts, whatever code it maps to: ``rate_limited``,
+    ``network_error`` for the server's empty 503 while its database is
+    unreachable (CLIENT_PROTOCOL 5.3) or a gateway's 503, the code of a
+    Velsigil error body such as 503 ``service_busy``. Delta-seconds or an
+    HTTP-date (rounded up, measured from ``now``, the local clock), clamped to
+    0..86400 (one day). ``None`` for every other status and when the header is
+    absent or unparseable.
+    """
+    if status not in (429, 503):
+        return None
     try:
         value = headers.get("Retry-After") if headers is not None else None
     except Exception:  # noqa: BLE001 - defensive against odd header objects
         return None
-    if isinstance(value, str) and value.strip().isdigit():
-        return min(int(value.strip()), 86400)
-    return None
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if _DELTA_SECONDS_RE.match(value):
+        digits = value.lstrip("0") or "0"
+        return _MAX_RETRY_AFTER if len(digits) > 6 else min(int(digits), _MAX_RETRY_AFTER)
+    try:
+        when = parsedate_to_datetime(value)
+        if when.tzinfo is None:  # "-0000" or no zone: an HTTP-date is always GMT
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        seconds = math.ceil(when.timestamp() - now)
+    except Exception:  # noqa: BLE001 - email.utils on odd input (some 3.x releases raise more than ValueError)
+        # Never let a malformed header break the result: an exception here would turn a 503 into an
+        # invalid_response without http_status, which validate_with_offline_fallback does not fall back on.
+        return None
+    return max(0, min(seconds, _MAX_RETRY_AFTER))
 
 
 def _code_for_status(status: int, velsigil_body: bool) -> str:
@@ -1084,8 +1132,14 @@ def _code_for_status(status: int, velsigil_body: bool) -> str:
     return Code.INVALID_RESPONSE
 
 
-def _unsigned_error(status: int, raw: bytes, headers: Any, response_type: Optional[str] = None) -> VelsigilResult:
-    """Map an unsigned (non-200) response to a failure. Never yields ok=True."""
+def _unsigned_error(
+    status: int, raw: bytes, headers: Any, response_type: Optional[str] = None, now: Optional[float] = None
+) -> VelsigilResult:
+    """Map an unsigned (non-200) response to a failure. Never yields ok=True.
+
+    ``now``: the client's local clock (unix seconds) for an HTTP-date
+    ``Retry-After``; the system clock when omitted.
+    """
     code: Optional[str] = None
     request_id: Optional[str] = None
     velsigil_body = False
@@ -1114,7 +1168,7 @@ def _unsigned_error(status: int, raw: bytes, headers: Any, response_type: Option
         _UNSIGNED_MESSAGES.get(code, _UNSIGNED_MESSAGES[Code.INVALID_RESPONSE]),
         request_id=request_id,
         http_status=status,
-        retry_after=_retry_after(headers) if code == Code.RATE_LIMITED else None,
+        retry_after=_retry_after(status, headers, time.time() if now is None else now),
     )
 
 

@@ -33,7 +33,7 @@
 namespace velsigil {
 
 /// SDK version (semantic versioning).
-inline constexpr char kSdkVersion[] = "1.0.3";
+inline constexpr char kSdkVersion[] = "1.0.4";
 
 /// Result codes. Server codes are defined in SPEC section 10.3; the SDK adds a few local ones.
 namespace codes {
@@ -185,6 +185,13 @@ struct ValidationResult {
   /// Offline results: the time of the check (unix seconds, clock plus the learned server offset). The default
   /// `now` of days_until_expiry() for results without `server_time`.
   std::optional<std::int64_t> reference_time;
+  /// Seconds to wait before trying the server again (0..86400), from the `Retry-After` header of an HTTP 429 or
+  /// 503 answer, whatever code it maps to (SPEC 14, the same in every Velsigil SDK): rate_limited, network_error
+  /// (the server's empty 503 while its database is unreachable, or a gateway's 503) or the code of a Velsigil error
+  /// body (503 service_busy -> internal_error). Delta-seconds or an HTTP-date (measured from the client's clock).
+  /// validate_with_offline_fallback() copies it to the offline result it falls back to. nullopt for every other
+  /// answer and when the header is absent or unparseable.
+  std::optional<std::int64_t> retry_after;
 
   explicit operator bool() const noexcept { return ok; }
 
@@ -325,6 +332,9 @@ struct HttpResponse {
   long status = 0;
   std::string body;
   std::string error;  // transport error description; must not contain secrets
+  /// The raw value of the response's `Retry-After` header, when it had one (the libcurl transport sets it; a
+  /// custom transport should too). The Client reads it for HTTP 429 and 503 answers (ValidationResult::retry_after).
+  std::optional<std::string> retry_after;
 };
 
 /// HTTP transport abstraction. The default implementation uses libcurl with TLS verification
@@ -536,6 +546,8 @@ class Client {
   /// the result is that of validate_offline() (`offline == true`): `ok` for a usable lease, `lease_expired` /
   /// `lease_invalid` for a stored lease that cannot be used (it stays stored, as with validate_offline()). Only when
   /// no lease is stored is the original online result (`network_error` / `internal_error`) returned, not `no_lease`.
+  /// A result of the fallback carries the `retry_after` of the failed online attempt (the `Retry-After` of a 503),
+  /// so the application knows when to try online again; validate_offline() called directly never sets it.
   ValidationResult validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& options = {});
 
   /// Downloads a release described by get_download() to `destination` (streamed to a temporary file

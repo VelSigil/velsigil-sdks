@@ -342,10 +342,67 @@ public class OfflineTests
         var result = await client.ValidateWithOfflineFallbackAsync(Key);
 
         Assert.Equal(onlineCode, online.Code);
-        Assert.Null(online.RetryAfter); // Retry-After is surfaced for rate_limited only
+        // The empty 503 carries Retry-After: 30 (1.0.4: read from every 429 and 503), and the fallback result keeps it.
+        var retryAfter = kind == "503-empty" ? TimeSpan.FromSeconds(30) : (TimeSpan?)null;
+        Assert.Equal(retryAfter, online.RetryAfter);
         Assert.True(result.Ok);
         Assert.True(result.Offline);
+        Assert.Equal(retryAfter, result.RetryAfter);
         Assert.Equal(2, http.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData("503-empty", 30)]     // the empty 503 of a database outage (CLIENT_PROTOCOL 5.3)
+    [InlineData("503-json-busy", 5)]  // 503 service_busy
+    [InlineData("500-json", null)]
+    [InlineData("502-html", null)]
+    public async Task Fallback_results_carry_the_retry_after_of_the_failed_online_answer(string kind, int? seconds)
+    {
+        var expected = seconds.HasValue ? TimeSpan.FromSeconds(seconds.Value) : (TimeSpan?)null;
+        var server = new MockServer();
+        server.Respond(_ => Unavailable(kind));
+        VelsigilClient ClientWith(string? lease, long now)
+        {
+            var store = new MemoryStore();
+            if (lease != null) store.SetLeaseToken(Vectors.ProductId, lease);
+            return TestClients.Create(server, store, new FakeClock(now));
+        }
+
+        using var valid = ClientWith(Vectors.ValidLeaseToken, Payloads.ServerTime + 60);
+        using var expired = ClientWith(Vectors.ValidLeaseToken, Vectors.LeaseExpiresAt);
+        using var invalid = ClientWith("not-a-lease-token", Payloads.ServerTime + 60);
+        using var none = ClientWith(null, Payloads.ServerTime + 60);
+
+        foreach (var (client, code) in new[] { (valid, ResultCodes.Ok), (expired, ResultCodes.LeaseExpired), (invalid, ResultCodes.LeaseInvalid) })
+        {
+            var result = await client.ValidateWithOfflineFallbackAsync(Key);
+            Assert.Equal(code, result.Code);
+            Assert.True(result.Offline);
+            Assert.Equal(expected, result.RetryAfter);
+        }
+        // Nothing stored: the online result itself, which already has it.
+        var original = await none.ValidateWithOfflineFallbackAsync(Key);
+        Assert.False(original.Offline);
+        Assert.Equal(expected, original.RetryAfter);
+        // A direct offline check made no online attempt.
+        var direct = valid.ValidateOffline();
+        Assert.True(direct.Ok);
+        Assert.Null(direct.RetryAfter);
+    }
+
+    [Fact]
+    public async Task Fallback_after_a_connection_failure_has_no_retry_after()
+    {
+        var server = new MockServer { Handler = (_, _) => throw new HttpRequestException("Connection refused") };
+        var store = new MemoryStore();
+        store.SetLeaseToken(Vectors.ProductId, Vectors.ValidLeaseToken);
+        using var client = TestClients.Create(server, store, new FakeClock(Payloads.ServerTime + 60));
+
+        var result = await client.ValidateWithOfflineFallbackAsync(Key);
+
+        Assert.True(result.Ok);
+        Assert.True(result.Offline);
+        Assert.Null(result.RetryAfter);
     }
 
     [Fact]

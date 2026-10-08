@@ -18,8 +18,10 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -200,6 +202,13 @@ HttpResponse http(long status, std::string body) {
   response.transport_ok = true;
   response.status = status;
   response.body = std::move(body);
+  return response;
+}
+
+// An answer with a `Retry-After` header (the raw value, as the libcurl transport hands it over).
+HttpResponse http(long status, std::string body, std::string retry_after) {
+  HttpResponse response = http(status, std::move(body));
+  response.retry_after = std::move(retry_after);
   return response;
 }
 
@@ -652,6 +661,144 @@ void test_unsigned_errors(const Keys& keys) {
   check(limited.message.find("Too many requests.") == std::string::npos && !limited.message.empty(),
         "unsigned error message is SDK text");
   check(limited.request_id == std::string("req-429"), "unsigned error request id");
+  check(!limited.retry_after, "429 without a Retry-After header: no retry_after");
+}
+
+// SPEC 14 (1.0.4): ValidationResult::retry_after comes from the Retry-After of every HTTP 429 and 503 answer, whatever
+// code it maps to; nullopt for every other status and when the header is absent or unparseable.
+void test_retry_after(const Keys& keys) {
+  struct Case {
+    long status;
+    std::string body;
+    std::optional<std::string> header;
+    std::string expected_code;
+    std::optional<std::int64_t> expected;
+  };
+  const std::string busy = R"({"error":{"code":"service_busy","message":"The service is busy. Please try again shortly."}})";
+  const std::vector<Case> cases = {
+      {503, "", std::string("30"), "network_error", 30},  // the server's empty 503 while its database is unreachable
+      {503, busy, std::string("5"), "internal_error", 5},
+      {503, R"({"error":{"code":"internal_error"}})", std::string("7"), "internal_error", 7},
+      {503, "<html>Service Unavailable</html>", std::string("120"), "network_error", 120},  // a gateway's 503
+      {503, R"({"error":{"code":"rate_limited"}})", std::string("9"), "rate_limited", 9},
+      {429, R"({"error":{"code":"rate_limited","message":"Too many requests."}})", std::string("30"), "rate_limited", 30},
+      {429, "", std::string("12"), "rate_limited", 12},
+      {503, "", std::nullopt, "network_error", std::nullopt},
+      {503, "", std::string("soon"), "network_error", std::nullopt},
+      {503, "", std::string(""), "network_error", std::nullopt},
+      {429, "", std::string("-5"), "rate_limited", std::nullopt},
+      {503, "", std::string("999999999999999999999999"), "network_error", 86400},  // capped at one day, no overflow
+      {503, "", std::string(" 0 "), "network_error", 0},
+      {500, R"({"error":{"code":"internal_error"}})", std::string("30"), "internal_error", std::nullopt},
+      {502, "<html>Bad Gateway</html>", std::string("30"), "network_error", std::nullopt},
+      {504, "", std::string("30"), "network_error", std::nullopt},
+      {400, R"({"error":{"code":"validation_error"}})", std::string("30"), "validation_error", std::nullopt},
+      {307, "", std::string("30"), "invalid_response", std::nullopt},
+      {200, "<html>proxy</html>", std::string("30"), "invalid_response", std::nullopt},
+  };
+  for (const Case& c : cases) {
+    Harness h(keys);
+    h.server->handler = [&c](const std::string&, const json&) {
+      HttpResponse response = http(c.status, c.body);
+      response.retry_after = c.header;
+      return response;
+    };
+    const auto result = h.client.validate(kLicenseKey);
+    const std::string name = "HTTP " + std::to_string(c.status) + " " + c.body + " Retry-After '" + c.header.value_or("<none>") + "'";
+    check_equal(result.code, c.expected_code, name + ": code");
+    check(result.retry_after == c.expected, name + ": retry_after");
+    check(!result.ok && !result.offline, name + ": a failure, not offline");
+  }
+
+  // A signed answer never carries one, even with the header.
+  {
+    Harness h(keys);
+    h.server->handler = [&h](const std::string&, const json& request) {
+      json p = payload(request, "validate", true, "ok", kStartTime);
+      p["license"] = license_json(kStartTime + 30 * 86400);
+      return http(200, h.signer.envelope(p), "30");
+    };
+    const auto result = h.client.validate(kLicenseKey);
+    check(result.ok && !result.retry_after, "signed ok with a Retry-After header: no retry_after");
+  }
+
+  // The HTTP-date form, measured from the client's clock (kStartTime is Thu, 01 Jan 2026 00:00:00 GMT).
+  struct DateCase {
+    long status;
+    std::string header;
+    std::optional<std::int64_t> expected;
+  };
+  const std::vector<DateCase> dates = {
+      {503, "Thu, 01 Jan 2026 00:01:30 GMT", 90},      // IMF-fixdate
+      {429, "Thu, 01 Jan 2026 00:00:45 GMT", 45},
+      {503, "Thursday, 01-Jan-26 00:02:00 GMT", 120},  // RFC 850
+      {503, "Thu Jan  1 00:00:10 2026", 10},           // asctime
+      {503, "Wed, 31 Dec 2025 23:59:00 GMT", 0},       // in the past
+      {503, "Sat, 03 Jan 2026 00:00:00 GMT", 86400},   // capped at one day
+      {503, "Sat, 31 Feb 2026 00:00:00 GMT", std::nullopt},
+      {503, "Thu, 01 Jan 2026 nope", std::nullopt},
+      {500, "Thu, 01 Jan 2026 00:01:30 GMT", std::nullopt},
+  };
+  for (const DateCase& d : dates) {
+    Harness h(keys);
+    h.server->handler = [&d](const std::string&, const json&) { return http(d.status, "", d.header); };
+    const auto result = h.client.validate(kLicenseKey);
+    check(result.retry_after == d.expected, "HTTP " + std::to_string(d.status) + " Retry-After '" + d.header + "'");
+  }
+  {
+    // The local clock, not the learned server offset (a signed clock_skew teaches an offset of one hour first).
+    Harness h(keys);
+    bool skewed = false;
+    h.server->handler = [&h, &skewed](const std::string&, const json& request) {
+      if (!skewed) {
+        skewed = true;
+        return http(200, h.signer.envelope(payload(request, "validate", false, "clock_skew", kStartTime + 3600)));
+      }
+      return http(503, "", "Thu, 01 Jan 2026 00:01:30 GMT");
+    };
+    const auto result = h.client.validate(kLicenseKey);
+    check_equal(result.code, "network_error", "clock_skew then 503: code");
+    check(result.retry_after == std::optional<std::int64_t>(90), "an HTTP-date Retry-After is measured from the local clock");
+  }
+}
+
+// The Retry-After parser itself (src/detail.hpp).
+void test_parse_retry_after() {
+  using velsigil::detail::parse_retry_after;
+  using Seconds = std::optional<std::int64_t>;
+  constexpr std::int64_t kRfcExample = 784111777;  // Sun, 06 Nov 1994 08:49:37 GMT (RFC 9110's example date)
+  check(parse_retry_after("30", 0) == Seconds(30), "delta-seconds");
+  check(parse_retry_after(" \t30 ", 0) == Seconds(30), "delta-seconds with surrounding whitespace");
+  check(parse_retry_after("0", 0) == Seconds(0), "zero");
+  check(parse_retry_after("00042", 0) == Seconds(42), "leading zeros");
+  check(parse_retry_after("86400", 0) == Seconds(86400), "one day");
+  check(parse_retry_after("86401", 0) == Seconds(86400), "more than a day is capped");
+  check(parse_retry_after("99999999999999999999999999999999", 0) == Seconds(86400), "a huge number neither overflows nor wraps");
+  for (const char* bad : {"", "   ", "+30", "-30", "30s", "1.5", "3 0", "0x10", "soon"}) {
+    check(!parse_retry_after(bad, 0), std::string("unparseable: '") + bad + "'");
+  }
+  check(parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", kRfcExample - 10) == Seconds(10), "IMF-fixdate");
+  check(parse_retry_after("Sunday, 06-Nov-94 08:49:37 GMT", kRfcExample - 10) == Seconds(10), "RFC 850 date");
+  check(parse_retry_after("Sun Nov  6 08:49:37 1994", kRfcExample - 10) == Seconds(10), "asctime date");
+  check(parse_retry_after("sun, 06 nov 1994 08:49:37 GMT", kRfcExample - 1) == Seconds(1), "names in any case");
+  check(parse_retry_after("Sun, 6 Nov 1994 08:49:37 GMT", kRfcExample - 1) == Seconds(1), "a one-digit day");
+  check(parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", kRfcExample) == Seconds(0), "now");
+  check(parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", kRfcExample + 3600) == Seconds(0), "in the past");
+  check(parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", kRfcExample - 86401) == Seconds(86400), "capped at one day");
+  check(parse_retry_after("Thu, 29 Feb 2024 00:00:00 GMT", 1709164800 - 5) == Seconds(5), "a leap day");
+  check(parse_retry_after("Thu, 01 Jan 1970 00:00:05 GMT", 0) == Seconds(5), "the epoch");
+  check(parse_retry_after("Fri, 31 Dec 9999 23:59:59 GMT", (std::numeric_limits<std::int64_t>::min)()) == Seconds(86400),
+        "no overflow with a clock far in the past");
+  check(parse_retry_after("Thu, 01 Jan 1970 00:00:05 GMT", (std::numeric_limits<std::int64_t>::max)()) == Seconds(0),
+        "no overflow with a clock far in the future");
+  for (const char* bad : {"Sun, 06 Nov 1994 08:49:37 UTC", "Sun, 06 Nov 1994 08:49:37", "Sun, 06 Nov 1994 08:49:37 GMT extra",
+                          "Foo, 06 Nov 1994 08:49:37 GMT", "Sun, 06 Foo 1994 08:49:37 GMT", "Sun, 31 Nov 1994 08:49:37 GMT",
+                          "Sun, 29 Feb 2025 08:49:37 GMT", "Sun, 00 Nov 1994 08:49:37 GMT", "Sun, 06 Nov 94 08:49:37 GMT",
+                          "Sun, 06 Nov 1994 24:00:00 GMT", "Sun, 06 Nov 1994 08:60:00 GMT", "Sun, 06 Nov 1994 8:49:37 GMT",
+                          "Sunday, 06-Nov-1994 08:49:37 GMT", "Sun, 06-Nov-94 08:49:37 GMT", "Sun Nov 6 08:49:37 94",
+                          "Sun 06 Nov 1994 08:49:37 GMT", "06 Nov 1994 08:49:37 GMT"}) {
+    check(!parse_retry_after(bad, 0), std::string("not an HTTP-date: '") + bad + "'");
+  }
 }
 
 // In-app free trials (SPEC 9.7 "In-app trials"): Client::start_trial.
@@ -1133,6 +1280,74 @@ void test_offline_fallback_server_unavailable(const Keys& keys) {
     check(result.message.find("offline lease") == std::string::npos, f.name + ": the online message, no lease consulted");
     check(stored(h, velsigil::store_keys::kLease).has_value() == f.lease_kept, f.name + ": stored lease");
   }
+}
+
+// 1.0.4: a result of the offline fallback (ok offline, lease_expired, lease_invalid) carries the retry_after of the
+// failed online attempt, so the application knows when to try online again; validate_offline() called directly
+// never has one.
+void test_offline_fallback_retry_after(const Keys& keys) {
+  const std::int64_t now = kStartTime;
+  struct Outage {
+    std::string name;
+    HttpResponse response;
+    std::optional<std::int64_t> expected;
+  };
+  const std::vector<Outage> outages = {
+      {"503 empty body", http(503, "", "30"), 30},
+      {"503 service_busy", http(503, R"({"error":{"code":"service_busy","message":"Busy."}})", "5"), 5},
+      {"503 without Retry-After", http(503, ""), std::nullopt},
+      {"500 with Retry-After", http(500, R"({"error":{"code":"internal_error"}})", "30"), std::nullopt},
+      {"502 with Retry-After", http(502, "<html>Bad Gateway</html>", "30"), std::nullopt},
+      {"no HTTP response", unreachable("Couldn't connect to server"), std::nullopt},
+  };
+  for (const Outage& o : outages) {
+    auto respond = [&o](const std::string&, const json&) { return o.response; };
+    {
+      Harness h(keys);
+      h.store->set(kProduct, velsigil::store_keys::kLease, h.signer.lease(lease_claims(now, now + 86400)));
+      h.server->handler = respond;
+      const auto result = h.client.validate_with_offline_fallback(kLicenseKey);
+      check(result.ok && result.offline, o.name + ", usable lease: offline ok");
+      check(result.retry_after == o.expected, o.name + ", usable lease: the online retry_after");
+      const auto direct = h.client.validate_offline();
+      check(direct.ok && direct.offline && !direct.retry_after, o.name + ", usable lease: validate_offline() has none");
+    }
+    {
+      Harness h(keys);
+      h.store->set(kProduct, velsigil::store_keys::kLease, h.signer.lease(lease_claims(now - 86400, now)));  // exp reached
+      h.server->handler = respond;
+      const auto result = h.client.validate_with_offline_fallback(kLicenseKey);
+      check_equal(result.code, velsigil::codes::kLeaseExpired, o.name + ", expired lease: code");
+      check(result.retry_after == o.expected, o.name + ", expired lease: the online retry_after");
+      const auto direct = h.client.validate_offline();
+      check(direct.code == velsigil::codes::kLeaseExpired && !direct.retry_after,
+            o.name + ", expired lease: validate_offline() has none");
+    }
+    {
+      Harness h(keys);
+      h.store->set(kProduct, velsigil::store_keys::kLease,
+                   h.signer.lease(lease_claims(now, now + 86400, "another-device-hwid")));
+      h.server->handler = respond;
+      const auto result = h.client.validate_with_offline_fallback(kLicenseKey);
+      check_equal(result.code, velsigil::codes::kLeaseInvalid, o.name + ", invalid lease: code");
+      check(result.retry_after == o.expected, o.name + ", invalid lease: the online retry_after");
+    }
+    {
+      Harness h(keys);  // no lease stored: the online result itself, which already carries it
+      h.server->handler = respond;
+      const auto result = h.client.validate_with_offline_fallback(kLicenseKey);
+      check(!result.ok && !result.offline, o.name + ", no lease: the online failure");
+      check(result.retry_after == o.expected, o.name + ", no lease: its retry_after");
+    }
+  }
+
+  // 429 never falls back: the online result keeps its Retry-After.
+  Harness h(keys);
+  h.store->set(kProduct, velsigil::store_keys::kLease, h.signer.lease(lease_claims(now, now + 86400)));
+  h.server->handler = [](const std::string&, const json&) { return http(429, R"({"error":{"code":"rate_limited"}})", "12"); };
+  const auto limited = h.client.validate_with_offline_fallback(kLicenseKey);
+  check(!limited.ok && !limited.offline && limited.code == "rate_limited", "429 with a stored lease: no fallback");
+  check(limited.retry_after == std::optional<std::int64_t>(12), "429 with a stored lease: the online retry_after");
 }
 
 void test_deactivate(const Keys& keys) {
@@ -2131,10 +2346,13 @@ int main(int argc, char** argv) {
     test_tampered_responses(keys);
     test_clock_skew(keys);
     test_unsigned_errors(keys);
+    test_retry_after(keys);
+    test_parse_retry_after();
     test_start_trial(keys);
     test_network_errors(keys);
     test_offline_fallback(keys);
     test_offline_fallback_server_unavailable(keys);
+    test_offline_fallback_retry_after(keys);
     test_deactivate(keys);
     test_device_binding(keys);
     test_update_and_download(keys);

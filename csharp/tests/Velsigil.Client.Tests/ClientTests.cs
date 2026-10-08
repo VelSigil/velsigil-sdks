@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
@@ -614,7 +615,8 @@ public class ClientTests
         Assert.Equal(status, result.HttpStatus);
         Assert.Equal("11111111-2222-4333-8444-555555555555", result.RequestId);
         Assert.DoesNotContain("Server says", result.Message, StringComparison.Ordinal);
-        Assert.Equal(status == 429 ? TimeSpan.FromSeconds(30) : (TimeSpan?)null, result.RetryAfter);
+        // Retry-After is read from every 429 and 503, whatever code it maps to (1.0.4).
+        Assert.Equal(status == 429 || status == 503 ? TimeSpan.FromSeconds(30) : (TimeSpan?)null, result.RetryAfter);
     }
 
     [Theory]
@@ -655,6 +657,88 @@ public class ClientTests
 
         Assert.False(result.Ok);
         Assert.Equal(expected, result.Code);
+    }
+
+    // ---- Retry-After of 429 and 503 answers (1.0.4, identical in every Velsigil SDK) ---------------------------
+
+    /// <summary>
+    /// An answer with <c>Retry-After</c>: no body, a Velsigil error body with <paramref name="body"/> as its code, an HTML
+    /// page, or a body over the 64 KB error-body cap ("oversized").
+    /// </summary>
+    private static HttpResponseMessage WithRetryAfter(int status, string body, string retryAfter)
+    {
+        if (body.Length == 0) return Responses.Empty(status, ("Retry-After", retryAfter));
+        if (body == "html" || body == "oversized")
+        {
+            var page = Responses.Text(status, body == "html" ? "<html>Service Unavailable</html>" : new string('x', 70 * 1024));
+            page.Headers.TryAddWithoutValidation("Retry-After", retryAfter);
+            return page;
+        }
+        return Responses.Error(status, body, headers: new[] { ("Retry-After", retryAfter) });
+    }
+
+    [Theory]
+    [InlineData(503, "", "network_error", 30)]               // the empty 503 of a database outage (CLIENT_PROTOCOL 5.3)
+    [InlineData(503, "service_busy", "internal_error", 30)]  // a Velsigil error body
+    [InlineData(503, "html", "network_error", 30)]           // a gateway's page
+    [InlineData(503, "oversized", "network_error", 30)]      // a body over the error-body cap
+    [InlineData(503, "rate_limited", "rate_limited", 30)]    // a 503 naming a 4xx code
+    [InlineData(429, "rate_limited", "rate_limited", 30)]    // unchanged
+    [InlineData(429, "", "rate_limited", 30)]
+    [InlineData(403, "rate_limited", "rate_limited", null)]  // the status decides, not the code
+    [InlineData(500, "", "internal_error", null)]
+    [InlineData(500, "internal_error", "internal_error", null)]
+    [InlineData(502, "", "network_error", null)]
+    [InlineData(502, "internal_error", "internal_error", null)]
+    [InlineData(504, "", "network_error", null)]
+    [InlineData(504, "html", "network_error", null)]
+    public async Task Retry_after_is_read_from_every_429_and_503_answer_only(int status, string body, string expected, int? seconds)
+    {
+        var server = new MockServer();
+        server.Respond(_ => WithRetryAfter(status, body, "30"));
+        using var client = TestClients.Create(server);
+
+        var result = await client.ValidateAsync(Key);
+
+        Assert.False(result.Ok);
+        Assert.Equal(expected, result.Code);
+        Assert.Equal(status, result.HttpStatus);
+        Assert.Equal(seconds.HasValue ? TimeSpan.FromSeconds(seconds.Value) : (TimeSpan?)null, result.RetryAfter);
+    }
+
+    [Theory]
+    [InlineData(503, 90, 90)]
+    [InlineData(429, 45, 45)]
+    [InlineData(503, -60, 0)] // a date in the past: retry now
+    public async Task Retry_after_reads_the_http_date_form(int status, int offsetSeconds, int expectedSeconds)
+    {
+        var date = DateTimeOffset.FromUnixTimeSeconds(Payloads.ServerTime + offsetSeconds).ToString("r", CultureInfo.InvariantCulture);
+        var server = new MockServer();
+        server.Respond(_ => Responses.Empty(status, ("Retry-After", date)));
+        using var client = TestClients.Create(server, clock: new FakeClock(Payloads.ServerTime));
+
+        var result = await client.ValidateAsync(Key);
+
+        Assert.Equal(status == 429 ? ResultCodes.RateLimited : ResultCodes.NetworkError, result.Code);
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), result.RetryAfter);
+    }
+
+    [Fact]
+    public async Task Retry_after_is_null_when_a_503_has_no_or_an_unparseable_header()
+    {
+        var server = new MockServer();
+        var withHeader = false;
+        server.Respond(_ => withHeader ? Responses.Empty(503, ("Retry-After", "soon")) : Responses.Empty(503));
+        using var client = TestClients.Create(server);
+
+        var absent = await client.ValidateAsync(Key);
+        withHeader = true;
+        var unparseable = await client.ValidateAsync(Key);
+
+        Assert.Equal(ResultCodes.NetworkError, absent.Code);
+        Assert.Null(absent.RetryAfter);
+        Assert.Equal(ResultCodes.NetworkError, unparseable.Code);
+        Assert.Null(unparseable.RetryAfter);
     }
 
     // ---- Transport failures -------------------------------------------------------------------------

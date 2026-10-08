@@ -146,7 +146,7 @@ The constructor throws `ArgumentException` / `ArgumentOutOfRangeException` for i
 | Member | Description |
 |---|---|
 | `Task<VelsigilResult> ValidateAsync(string licenseKey, ValidateOptions? options = null, CancellationToken ct = default)` | Validates the key for this device, activating it if a slot is free. Persists a newly issued device secret and the offline lease. `ValidateOptions { Version (≤ 32), DeviceName (≤ 255) }`. |
-| `Task<VelsigilResult> ValidateWithOfflineFallbackAsync(string licenseKey, ValidateOptions? options = null, CancellationToken ct = default)` | Online first; falls back to `ValidateOffline()` **only** when the server is unavailable: `network_error` (no response) or any unsigned HTTP 5xx answer (`internal_error`, or `network_error` for a gateway 502/503/504 without a Velsigil error body), see [Offline leases](#offline-leases). Signed answers, 4xx answers and `invalid_response` are returned as is. If no lease is stored, the original `network_error` / `internal_error` result is returned (not `no_lease`), as in every Velsigil SDK. |
+| `Task<VelsigilResult> ValidateWithOfflineFallbackAsync(string licenseKey, ValidateOptions? options = null, CancellationToken ct = default)` | Online first; falls back to `ValidateOffline()` **only** when the server is unavailable: `network_error` (no response) or any unsigned HTTP 5xx answer (`internal_error`, or `network_error` for a gateway 502/503/504 without a Velsigil error body), see [Offline leases](#offline-leases). Signed answers, 4xx answers and `invalid_response` are returned as is. If no lease is stored, the original `network_error` / `internal_error` result is returned (not `no_lease`), as in every Velsigil SDK. A fallback result carries the failed online answer's `RetryAfter`. |
 | `VelsigilResult ValidateOffline()` | Verifies the stored lease (signature, type, product, this device, expiry). Never touches the network. |
 | `Task<VelsigilResult> StartTrialAsync(StartTrialOptions? options = null, CancellationToken ct = default)` | Starts a free trial of the product on this device without a license key (see [In-app free trials](#in-app-free-trials)). On `Ok`, `result.TrialKey` is the new key: store it, then use `ValidateAsync`. Persists the device secret and lease like `ValidateAsync`. `StartTrialOptions { Version (≤ 32), DeviceName (≤ 255), Email (≤ 254, sent only when set) }`. Returns `already_licensed` locally (nothing sent, nothing changed) when a device secret or lease is already stored for the product, and `store_unavailable` when the store cannot be read. |
 | `Task<VelsigilResult> DeactivateAsync(string licenseKey, CancellationToken ct = default)` | Frees this device's slot. On success the stored device secret and lease are deleted. |
@@ -206,7 +206,7 @@ including timeouts, DNS/TLS/connection errors, HTTP errors, bad signatures and l
 | `bool Offline` | Produced from the stored lease. |
 | `LeaseStatus? LeaseStatus` | Offline results: detailed lease verification outcome (`Valid`, `Expired`, `InvalidSignature`, `ProductMismatch`, `HwidMismatch`, `Malformed`). |
 | `bool Verified` | Backed by a verified signature. |
-| `long? ServerTimeUnix`, `int? HttpStatus`, `TimeSpan? RetryAfter` | Authoritative server time; HTTP status of unsigned errors; wait time for `rate_limited`. |
+| `long? ServerTimeUnix`, `int? HttpStatus`, `TimeSpan? RetryAfter` | Authoritative server time; HTTP status of unsigned errors; how long the server asked to wait (`Retry-After`, delta-seconds or HTTP date, capped at one day) on every HTTP 429 or 503 answer, whatever its code: `rate_limited`, `network_error` for the empty 503 of a server whose database is unreachable (`Retry-After: 30`) or a gateway's 503, `internal_error` for 503 `service_busy`. The results of `ValidateWithOfflineFallbackAsync`'s fallback (offline `ok`, `lease_expired`, `lease_invalid`) carry the value of the failed online attempt, so you know when to try online again. `null` without the header, for every other status and for `ValidateOffline()`. |
 | `string? TrialKey` | The key of the trial `StartTrialAsync` just started (`Ok` results of that method only; never in `ToString()`). Sent once: store it immediately. |
 | `IReadOnlyList<string> Features`, `bool HasFeature(string name)` | `HasFeature` is **false whenever `Ok` is false**, so a failed or forged response can never unlock a feature. Ordinal, case-sensitive. |
 | `DateTimeOffset? ExpiresAt`, `bool IsLifetime`, `TimeSpan? TimeRemaining`, `int? DaysRemaining`, `TimeSpan? GetTimeRemaining(DateTimeOffset now)`, `bool IsExpiringWithin(TimeSpan window)` | Expiry helpers (license expiry from the response, or from the lease when offline). `TimeRemaining`/`DaysRemaining` are measured at `ReferenceTimeUnix` (server time for signed responses, the time of the check offline). `DaysRemaining` rounds **up**: an N-day trial shows N right after `StartTrialAsync`, 1 on its last day and 0 once expired (the same rule in every Velsigil SDK). |
@@ -403,10 +403,12 @@ free-trial license (left out otherwise; fields the SDK does not know are ignored
   The HTTP status decides, not the code: `result.HttpStatus` is 500-599 and `result.Verified` is false. When the
   fallback applies and no lease is stored, the original online result (`network_error` or `internal_error`, with
   its `HttpStatus` and `RequestId`) is returned; a stored lease that is past its `exp` gives `lease_expired`, one
-  that does not verify gives `lease_invalid`. `ValidateAsync()` never falls back and always reports the real
-  error. Why an unsigned 5xx is safe to fall back on: anyone who can inject one can as well drop the connection,
-  which already falls back, and the lease itself is signed, bound to this device and expires. Tampered answers
-  stay `invalid_response`, never an offline pass, and a server that answers "revoked" is final.
+  that does not verify gives `lease_invalid`. A fallback result (`Offline` is true) keeps the `RetryAfter` of the
+  failed online answer (for example 30 seconds during a database outage, `null` when that answer had no
+  `Retry-After`): wait that long before validating online again. `ValidateAsync()` never falls back and always
+  reports the real error. Why an unsigned 5xx is safe to fall back on: anyone who can inject one can as well drop
+  the connection, which already falls back, and the lease itself is signed, bound to this device and expires.
+  Tampered answers stay `invalid_response`, never an offline pass, and a server that answers "revoked" is final.
 * `now` is the local clock plus the offset learned from a signed `clock_skew` response. Winding the system
   clock back can stretch a lease up to its `exp`; this is an inherent limitation of offline licensing, so
   keep *offline lease hours* as short as your users can tolerate.
@@ -526,7 +528,8 @@ private async void MainForm_Load(object sender, EventArgs e)
 ### Console apps, services and background workers
 
 Validate at startup and periodically (e.g. every few hours) with `ValidateWithOfflineFallbackAsync`;
-honour `RetryAfter` on `rate_limited`. Pass a `CancellationToken` tied to your host's shutdown. See
+honour `RetryAfter` when it is set (`rate_limited`, a 503 while the server is unavailable, and the offline
+fallback results that follow one). Pass a `CancellationToken` tied to your host's shutdown. See
 `examples/ConsoleExample`.
 
 ### Unity (Mono and IL2CPP)

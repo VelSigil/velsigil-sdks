@@ -713,6 +713,125 @@ ValidationResult unsigned_failure(long status, const json* body, std::string_vie
 // 200) and every 4xx (429 rate_limited, 400 validation_error, ...) stay final.
 bool server_unavailable_status(long status) noexcept { return status >= 500 && status <= 599; }
 
+// ---- Retry-After (SPEC 14) ------------------------------------------------------------------------
+// ValidationResult::retry_after comes from the Retry-After header of every HTTP 429 and 503 answer, whatever code it
+// maps to (rate_limited; network_error for the server's empty 503 while its database is unreachable or a gateway's
+// 503; internal_error for 503 service_busy). Delta-seconds or an HTTP-date, clamped to one day as in the Python
+// and .NET SDKs.
+
+constexpr std::int64_t kMaxRetryAfterSeconds = 86400;
+
+bool carries_retry_after(long status) noexcept { return status == 429 || status == 503; }
+
+// Days from 1970-01-01 to the proleptic Gregorian date year-month-day (H. Hinnant's days_from_civil).
+std::int64_t days_from_civil(std::int64_t year, std::int64_t month, std::int64_t day) noexcept {
+  year -= month <= 2 ? 1 : 0;
+  const std::int64_t era = (year >= 0 ? year : year - 399) / 400;
+  const std::int64_t year_of_era = year - era * 400;
+  const std::int64_t day_of_year = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + day - 1;
+  const std::int64_t day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+  return era * 146097 + day_of_era - 719468;
+}
+
+// `month` in 1..12.
+std::int64_t days_in_month(std::int64_t year, std::int64_t month) noexcept {
+  static constexpr std::int64_t kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  return month == 2 && leap ? 29 : kDays[static_cast<std::size_t>(month - 1)];
+}
+
+// The value of `text` when it is min_digits..max_digits (at most 4) ASCII digits, else -1.
+std::int64_t parse_small_number(std::string_view text, std::size_t min_digits, std::size_t max_digits) noexcept {
+  if (text.size() < min_digits || text.size() > max_digits) return -1;
+  std::int64_t value = 0;
+  for (const char c : text) {
+    if (c < '0' || c > '9') return -1;
+    value = value * 10 + (c - '0');
+  }
+  return value;
+}
+
+// 1..12 for "Jan".."Dec" (ASCII case-insensitive), else 0.
+std::int64_t parse_month(std::string_view text) noexcept {
+  static constexpr const char* kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  for (std::size_t i = 0; i < 12; ++i) {
+    if (detail::equals_ignore_case(text, kMonths[i])) return static_cast<std::int64_t>(i) + 1;
+  }
+  return 0;
+}
+
+// "Sun".."Sat" (`long_form`: "Sunday".."Saturday"), ASCII case-insensitive.
+bool is_day_name(std::string_view text, bool long_form) noexcept {
+  static constexpr const char* kShort[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+  static constexpr const char* kLong[] = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"};
+  for (std::size_t i = 0; i < 7; ++i) {
+    if (detail::equals_ignore_case(text, long_form ? kLong[i] : kShort[i])) return true;
+  }
+  return false;
+}
+
+// Seconds since midnight for "hh:mm:ss", else -1.
+std::int64_t parse_time_of_day(std::string_view text) noexcept {
+  if (text.size() != 8 || text[2] != ':' || text[5] != ':') return -1;
+  const std::int64_t hours = parse_small_number(text.substr(0, 2), 2, 2);
+  const std::int64_t minutes = parse_small_number(text.substr(3, 2), 2, 2);
+  const std::int64_t seconds = parse_small_number(text.substr(6, 2), 2, 2);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59) return -1;
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+// Unix time of an HTTP-date (RFC 9110 section 5.6.7; always GMT) in one of its three forms:
+//   IMF-fixdate  "Sun, 06 Nov 1994 08:49:37 GMT"
+//   RFC 850      "Sunday, 06-Nov-94 08:49:37 GMT"  (two-digit year: 69..99 -> 19xx, 00..68 -> 20xx)
+//   asctime      "Sun Nov  6 08:49:37 1994"
+// The day name is checked, not whether it matches the date. nullopt for anything else.
+std::optional<std::int64_t> http_date_unix(std::string_view text) noexcept {
+  std::string_view tokens[6];
+  std::size_t count = 0;
+  for (std::size_t pos = 0; pos < text.size();) {
+    if (text[pos] == ' ') {
+      ++pos;
+      continue;
+    }
+    std::size_t end = text.find(' ', pos);
+    if (end == std::string_view::npos) end = text.size();
+    if (count == 6) return std::nullopt;
+    tokens[count++] = text.substr(pos, end - pos);
+    pos = end;
+  }
+  std::int64_t year = -1;
+  std::int64_t month = 0;
+  std::int64_t day = -1;
+  std::int64_t time_of_day = -1;
+  if (count == 6 && tokens[0].size() == 4 && tokens[0].back() == ',' && is_day_name(tokens[0].substr(0, 3), false) &&
+      tokens[5] == "GMT") {
+    day = parse_small_number(tokens[1], 1, 2);
+    month = parse_month(tokens[2]);
+    year = parse_small_number(tokens[3], 4, 4);
+    time_of_day = parse_time_of_day(tokens[4]);
+  } else if (count == 4 && tokens[0].size() > 1 && tokens[0].back() == ',' &&
+             is_day_name(tokens[0].substr(0, tokens[0].size() - 1), true) && tokens[3] == "GMT") {
+    const std::string_view date = tokens[1];  // "06-Nov-94"
+    if (date.size() == 9 && date[2] == '-' && date[6] == '-') {
+      day = parse_small_number(date.substr(0, 2), 2, 2);
+      month = parse_month(date.substr(3, 3));
+      const std::int64_t two_digits = parse_small_number(date.substr(7, 2), 2, 2);
+      if (two_digits >= 0) year = two_digits > 68 ? 1900 + two_digits : 2000 + two_digits;
+    }
+    time_of_day = parse_time_of_day(tokens[2]);
+  } else if (count == 5 && is_day_name(tokens[0], false)) {
+    month = parse_month(tokens[1]);
+    day = parse_small_number(tokens[2], 1, 2);
+    time_of_day = parse_time_of_day(tokens[3]);
+    year = parse_small_number(tokens[4], 4, 4);
+  } else {
+    return std::nullopt;
+  }
+  if (year < 0 || month < 1 || day < 1 || day > days_in_month(year, month) || time_of_day < 0) return std::nullopt;
+  return days_from_civil(year, month, day) * 86400 + time_of_day;
+}
+
 // Signed denials after which a stored offline lease must not be used any more. This exact set is
 // binding for every Velsigil SDK (SPEC section 14); any other signed failure keeps the lease.
 bool revokes_offline_access(const std::string& code) {
@@ -800,6 +919,33 @@ std::int64_t system_unix_time() noexcept {
   using std::chrono::seconds;
   using std::chrono::system_clock;
   return static_cast<std::int64_t>(duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
+}
+
+std::optional<std::int64_t> parse_retry_after(std::string_view value, std::int64_t now_unix) noexcept {
+  value = trim(value);
+  if (value.empty()) return std::nullopt;
+  bool all_digits = true;
+  for (const char c : value) {
+    if (c < '0' || c > '9') {
+      all_digits = false;
+      break;
+    }
+  }
+  if (all_digits) {  // delta-seconds, of any length
+    std::int64_t seconds = 0;
+    for (const char c : value) {
+      seconds = seconds * 10 + (c - '0');
+      if (seconds >= kMaxRetryAfterSeconds) return kMaxRetryAfterSeconds;
+    }
+    return seconds;
+  }
+  const std::optional<std::int64_t> when = http_date_unix(value);
+  if (!when) return std::nullopt;
+  // Whole seconds on both sides, so nothing to round. Ordered so that no subtraction can overflow, whatever the
+  // injected clock returns.
+  if (*when <= now_unix) return 0;
+  if (now_unix < *when - kMaxRetryAfterSeconds) return kMaxRetryAfterSeconds;
+  return *when - now_unix;
 }
 
 }  // namespace detail
@@ -1183,6 +1329,10 @@ struct Client::Impl {
     const bool is_object = !body.is_discarded() && body.is_object();
     if (response.status != 200) {
       out.result = unsigned_failure(response.status, is_object ? &body : nullptr, type);
+      // Every 429 and 503, whatever code it maps to (see carries_retry_after); measured from the client's clock.
+      if (carries_retry_after(response.status) && response.retry_after) {
+        out.result.retry_after = detail::parse_retry_after(*response.retry_after, local_now());
+      }
       return out;
     }
     if (!is_object) {
@@ -1519,7 +1669,9 @@ ValidationResult Client::validate_offline() {
 // body; see server_unavailable_status). Signed answers, 4xx answers and invalid responses are returned as they are.
 // The fallback is validate_offline() itself (docs/CLIENT_PROTOCOL.md section 9): its offline result, ok for a usable
 // lease, else lease_expired / lease_invalid, with the stored lease left exactly as validate_offline() leaves it. Only
-// when no lease is stored (no_lease) is the original online result (network_error, internal_error) returned.
+// when no lease is stored (no_lease) is the original online result (network_error, internal_error) returned. A
+// result of the fallback carries the online attempt's retry_after (the Retry-After of a 503), so the application
+// knows when to try online again (SPEC 14, every SDK).
 ValidationResult Client::validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& options) {
   if (!impl_) return not_initialised();
   bool server_unavailable = false;
@@ -1532,8 +1684,10 @@ ValidationResult Client::validate_with_offline_fallback(const std::string& licen
   if (!server_unavailable) return online;
   ValidationResult offline = validate_offline();  // the same checks and error handling as a direct call
   // Without any stored lease the original failure is the more useful answer; otherwise validate_offline()'s
-  // result as is (code, message, offline flag, license and lease), as in every Velsigil SDK.
+  // result as is (code, message, offline flag, license and lease) plus the online retry_after, as in every
+  // Velsigil SDK.
   if (offline.code == codes::kNoLease) return online;
+  offline.retry_after = online.retry_after;
   return offline;
 }
 

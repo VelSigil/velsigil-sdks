@@ -1301,6 +1301,150 @@ describe('offline fallback when the server is unavailable (unsigned 5xx)', () =>
   });
 });
 
+// 1.0.4: retryAfter comes from the Retry-After of every 429 and 503 answer, whatever code it maps to (CLIENT_PROTOCOL
+// 5.3: the server's empty 503 during a database outage carries Retry-After: 30), and the results of the offline
+// fallback carry the value of the failed online attempt (identical in every Velsigil SDK).
+describe('Retry-After on 429 and 503 answers', () => {
+  const NOW_S = T0 + 600;
+  const LEASE_EXP = T0 + 3600;
+  const OUTAGE: MockReply = { kind: 'raw', status: 503, body: '', headers: { 'retry-after': '30', 'content-length': '0' } };
+
+  function storeWith(lease: string | null): MemoryStore {
+    const store = new MemoryStore();
+    if (lease !== null) store.save(PRODUCT_ID, { deviceSecret: SECRET_1, lease: { token: lease, expiresAt: LEASE_EXP } });
+    return store;
+  }
+
+  function validLease(key?: KeyObject): string {
+    return makeLease({ iat: T0, exp: LEASE_EXP, licenseExpiresAt: T0 + 30 * 86_400 }, key);
+  }
+
+  async function validateWith(reply: MockReply, options: VelsigilClientOptions = {}): Promise<VelsigilResult> {
+    server.handler = () => reply;
+    return makeClient({ clock: () => NOW_S * 1000, ...options }).validate(LICENSE_KEY);
+  }
+
+  it('the empty 503 of a database outage gives network_error with retryAfter 30', async () => {
+    expect(await validateWith(OUTAGE)).toMatchObject({ ok: false, code: 'network_error', retryAfter: 30 });
+  });
+
+  it('a 503 with a Velsigil service_busy body or a gateway page carries it too', async () => {
+    const busy: MockReply = {
+      kind: 'json',
+      status: 503,
+      body: { error: { code: 'service_busy', message: 'The service is busy.' } },
+      headers: { 'retry-after': '5' },
+    };
+    expect(await validateWith(busy)).toMatchObject({ code: 'internal_error', retryAfter: 5 });
+    const gateway: MockReply = { kind: 'raw', status: 503, body: '<html>Unavailable</html>', headers: { 'retry-after': '120' } };
+    expect(await validateWith(gateway)).toMatchObject({ code: 'network_error', retryAfter: 120 });
+  });
+
+  it('429 rate_limited is unchanged', async () => {
+    const limited: MockReply = {
+      kind: 'json',
+      status: 429,
+      body: { error: { code: 'rate_limited', message: 'Slow down' } },
+      headers: { 'retry-after': '30' },
+    };
+    expect(await validateWith(limited)).toMatchObject({ code: 'rate_limited', retryAfter: 30 });
+  });
+
+  it('500, 502 and 504 never carry it, whatever their body', async () => {
+    for (const status of [500, 502, 504]) {
+      const empty = await validateWith({ kind: 'raw', status, body: '', headers: { 'retry-after': '30' } });
+      expect(empty.retryAfter).toBeNull();
+      const velsigil = await validateWith({
+        kind: 'json',
+        status,
+        body: { error: { code: 'internal_error', message: 'x' } },
+        headers: { 'retry-after': '30' },
+      });
+      expect(velsigil).toMatchObject({ code: 'internal_error', retryAfter: null });
+    }
+  });
+
+  it('the status decides, not the code: a 503 naming rate_limited carries it, a 403 naming it does not', async () => {
+    const naming = (status: number): MockReply => ({
+      kind: 'json',
+      status,
+      body: { error: { code: 'rate_limited', message: 'x' } },
+      headers: { 'retry-after': '30' },
+    });
+    expect(await validateWith(naming(503))).toMatchObject({ code: 'rate_limited', retryAfter: 30 });
+    expect(await validateWith(naming(403))).toMatchObject({ code: 'rate_limited', retryAfter: null });
+  });
+
+  it('is null when the header is absent or unparseable', async () => {
+    expect((await validateWith({ kind: 'raw', status: 503, body: '' })).retryAfter).toBeNull();
+    expect((await validateWith({ kind: 'raw', status: 503, body: '', headers: { 'retry-after': 'soon' } })).retryAfter).toBeNull();
+  });
+
+  it('reads the HTTP-date form (a past date is 0)', async () => {
+    const at = (seconds: number) => new Date(seconds * 1000).toUTCString();
+    const outage = await validateWith({ kind: 'raw', status: 503, body: '', headers: { 'retry-after': at(NOW_S + 90) } });
+    expect(outage).toMatchObject({ code: 'network_error', retryAfter: 90 });
+    const limited = await validateWith({ kind: 'raw', status: 429, body: '', headers: { 'retry-after': at(NOW_S + 45) } });
+    expect(limited).toMatchObject({ code: 'rate_limited', retryAfter: 45 });
+    const past = await validateWith({ kind: 'raw', status: 503, body: '', headers: { 'retry-after': at(NOW_S - 60) } });
+    expect(past.retryAfter).toBe(0);
+  });
+
+  it('caps the value at one day, like every Velsigil SDK', async () => {
+    const after = async (value: string) =>
+      (await validateWith({ kind: 'raw', status: 503, body: '', headers: { 'retry-after': value } })).retryAfter;
+    expect(await after('86400')).toBe(86_400);
+    expect(await after('86401')).toBe(86_400);
+    expect(await after('0000030')).toBe(30);
+    expect(await after('99999999999999999999')).toBe(86_400);
+    expect(await after(new Date((NOW_S + 3 * 86_400) * 1000).toUTCString())).toBe(86_400);
+  });
+
+  it('an oversized 503 (invalid_response) still carries it', async () => {
+    const reply: MockReply = { kind: 'raw', status: 503, body: 'x'.repeat(8 * 1024), headers: { 'retry-after': '30' } };
+    expect(await validateWith(reply, { maxResponseBytes: 4096 })).toMatchObject({ code: 'invalid_response', retryAfter: 30 });
+  });
+
+  it("the offline fallback's results carry the failed online attempt's value; validateOffline does not", async () => {
+    server.handler = () => OUTAGE;
+    const fallback = async (store: MemoryStore, nowS = NOW_S) =>
+      makeClient({ store, clock: () => nowS * 1000 }).validateWithOfflineFallback(LICENSE_KEY);
+
+    const store = storeWith(validLease());
+    expect(await fallback(store)).toMatchObject({ ok: true, code: 'ok', offline: true, retryAfter: 30 });
+    expect(await fallback(storeWith(validLease()), LEASE_EXP)).toMatchObject({
+      ok: false,
+      code: 'lease_expired',
+      offline: true,
+      retryAfter: 30,
+    });
+    expect(await fallback(storeWith(validLease(WRONG_KEY)))).toMatchObject({
+      ok: false,
+      code: 'lease_invalid',
+      offline: true,
+      retryAfter: 30,
+    });
+    // Nothing stored: the online result itself, which already has it.
+    expect(await fallback(storeWith(null))).toMatchObject({ code: 'network_error', offline: false, retryAfter: 30 });
+    // A direct offline check made no online attempt.
+    const direct = await makeClient({ store, clock: () => NOW_S * 1000 }).validateOffline();
+    expect(direct).toMatchObject({ ok: true, offline: true, retryAfter: null });
+
+    // The value of the answer that failed: 5 s for service_busy, none for a 500 or a dropped connection.
+    server.handler = () => ({
+      kind: 'json',
+      status: 503,
+      body: { error: { code: 'service_busy', message: 'Busy.' } },
+      headers: { 'retry-after': '5' },
+    });
+    expect(await fallback(storeWith(validLease()))).toMatchObject({ ok: true, offline: true, retryAfter: 5 });
+    server.handler = () => ({ kind: 'raw', status: 500, body: '', headers: { 'retry-after': '30' } });
+    expect(await fallback(storeWith(validLease()))).toMatchObject({ ok: true, offline: true, retryAfter: null });
+    server.handler = () => ({ kind: 'destroy' });
+    expect(await fallback(storeWith(validLease()))).toMatchObject({ ok: true, offline: true, retryAfter: null });
+  });
+});
+
 // Final sweep F-SDK-1: a store read that fails (a file lock, a locked keyring) is not "nothing stored".
 describe('store read failures', () => {
   const paidSecret = `dsk_${'P4idL1c3'.repeat(5)}abc`;

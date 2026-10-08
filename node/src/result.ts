@@ -97,7 +97,14 @@ export class VelsigilResult {
   readonly serverTime: number | null;
   /** True when the result was produced from a stored offline lease without contacting the server. */
   readonly offline: boolean;
-  /** Seconds to wait before retrying (from `Retry-After` on `rate_limited`). */
+  /**
+   * Seconds the server asked to wait before trying again (0..86400, a longer wait reads as one day): the `Retry-After`
+   * header (delta-seconds or HTTP date) of every HTTP 429 or 503 answer, whatever code it maps to (`rate_limited`;
+   * `network_error` for the empty 503 of a server whose database is unreachable, or a gateway's 503; `internal_error`
+   * for 503 `service_busy`). The results of the offline fallback of {@link VelsigilClient.validateWithOfflineFallback} (offline `ok`, `lease_expired`,
+   * `lease_invalid`) carry the value of the failed online attempt, so the app knows when to try online again. Null
+   * when the header is absent or unparseable, for every other status and for {@link VelsigilClient.validateOffline}.
+   */
   readonly retryAfter: number | null;
   /**
    * The license key of the free trial that {@link VelsigilClient.startTrial} just started (`ok` results only; null

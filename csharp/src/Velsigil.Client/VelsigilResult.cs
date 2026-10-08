@@ -74,7 +74,17 @@ public sealed class VelsigilResult
     /// <summary>HTTP status for unsigned/HTTP-level failures; 200 for signed responses; null otherwise.</summary>
     public int? HttpStatus { get; private set; }
 
-    /// <summary>For <see cref="ResultCodes.RateLimited"/>: how long the server asked to wait, when provided.</summary>
+    /// <summary>
+    /// How long the server asked to wait before trying again: the <c>Retry-After</c> header (delta-seconds or HTTP
+    /// date, capped at one day) of every HTTP 429 or 503 answer, whatever code it maps to
+    /// (<see cref="ResultCodes.RateLimited"/>; <see cref="ResultCodes.NetworkError"/> for the empty 503 of a server whose
+    /// database is unreachable, or a gateway's 503; <see cref="ResultCodes.InternalError"/> for 503 <c>service_busy</c>;
+    /// <see cref="VelsigilClient.DownloadFileAsync"/> reports a 503 as <see cref="ResultCodes.NetworkError"/>).
+    /// The results of the offline fallback of <see cref="VelsigilClient.ValidateWithOfflineFallbackAsync"/>
+    /// (<see cref="ResultCodes.Ok"/>, <see cref="ResultCodes.LeaseExpired"/>, <see cref="ResultCodes.LeaseInvalid"/>)
+    /// carry the value of the failed online attempt, so the app knows when to try online again. Null when the header is
+    /// absent or unparseable, for every other status and for <see cref="VelsigilClient.ValidateOffline"/>.
+    /// </summary>
     public TimeSpan? RetryAfter { get; private set; }
 
     /// <summary>
@@ -253,6 +263,16 @@ public sealed class VelsigilResult
 
     internal static VelsigilResult OfflineFailure(string code, string message, long nowUnix) =>
         new VelsigilResult(false, code, message, nowUnix) { Offline = true };
+
+    /// <summary>
+    /// Sets <see cref="RetryAfter"/> on an offline result the SDK has just built and not handed out yet: the fallback of
+    /// <see cref="VelsigilClient.ValidateWithOfflineFallbackAsync"/> copies the failed online answer's value onto it.
+    /// </summary>
+    internal VelsigilResult WithRetryAfter(TimeSpan? retryAfter)
+    {
+        RetryAfter = retryAfter;
+        return this;
+    }
 
     internal static VelsigilResult DownloadCompleted(DownloadInfo download, long nowUnix) =>
         new VelsigilResult(true, ResultCodes.Ok, "Download completed and verified against the signed SHA-256.", nowUnix)

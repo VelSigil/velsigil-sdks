@@ -1,5 +1,25 @@
 # Changelog - Velsigil C++ SDK (`velsigil`)
 
+## 1.0.4 (2026-10-08)
+
+### Added
+
+- `ValidationResult::retry_after` (`std::optional<std::int64_t>`, seconds, 0..86400): set from the `Retry-After`
+  header of every HTTP 429 or 503 answer, whatever code it maps to: `rate_limited`, `network_error` for the
+  server's empty 503 while its database is unreachable (`Retry-After: 30`) or a gateway's 503, and the code of a
+  Velsigil error body such as 503 `service_busy` (`internal_error`). Delta-seconds or an HTTP-date (IMF-fixdate,
+  RFC 850 or asctime form, measured from the client's clock), capped at one day; nullopt for every other status
+  and when the header is absent or unparseable. The C++ SDK had no such field before (the other SDKs exposed it
+  for `rate_limited` only); the rule is now the same in every Velsigil SDK (SPEC 14).
+- `validate_with_offline_fallback()`: a result it falls back to (`ok` with `offline == true`, `lease_expired`,
+  `lease_invalid`) carries the `retry_after` of the failed online attempt, so an application running on its
+  offline lease knows when to try online again. Without a stored lease the online result is returned as before
+  (it carries its own `retry_after`); `validate_offline()` called directly never sets it.
+- `HttpResponse::retry_after` (`std::optional<std::string>`): the raw `Retry-After` header value of the response.
+  The libcurl transport fills it (from the final response's headers, also when an oversized body is dropped); a
+  custom `ITransport` should set it too, otherwise results carry no `retry_after`. Both new members are the last
+  of their structs, so existing aggregate initialisation still compiles.
+
 ## 1.0.3 (2026-10-08)
 
 ### Fixed

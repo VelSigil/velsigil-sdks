@@ -139,7 +139,7 @@ result instead.
 | `getDownload(licenseKey, version?)` → `Promise<VelsigilResult>` | A short-lived download link in `result.download`. The device must already be activated (`device_not_activated` otherwise). |
 | `downloadRelease(download, destination, { idleTimeout?, signal?, onProgress? })` → `Promise<DownloadFileResult>` | Streams the file and verifies its signed size and SHA-256. The file appears at `destination` only after it passes both checks. |
 | `validateOffline()` → `Promise<VelsigilResult>` | Validates the stored lease without contacting the server. Results have `offline: true`. |
-| `validateWithOfflineFallback(licenseKey, opts?)` → `Promise<VelsigilResult>` | Validates online first. **Only** when the server is unavailable (no HTTP response, or an unsigned HTTP 5xx; see [Offline leases](#offline-leases)) does it fall back to `validateOffline()`. If no lease is stored, the original online result (`network_error`, `internal_error`, …) is returned. |
+| `validateWithOfflineFallback(licenseKey, opts?)` → `Promise<VelsigilResult>` | Validates online first. **Only** when the server is unavailable (no HTTP response, or an unsigned HTTP 5xx; see [Offline leases](#offline-leases)) does it fall back to `validateOffline()`. If no lease is stored, the original online result (`network_error`, `internal_error`, …) is returned. A fallback result carries the failed online answer's `retryAfter`. |
 | `clearStoredState()` → `Promise<void>` | Forgets the device secret and lease for this product, e.g. when the user switches license keys. |
 | `static getHardwareId()` → `string` | This machine's hardware id (see [HWID](#hardware-id)). |
 | `productId`, `hardwareId`, `clockOffset` | Read-only: the normalized product id, the hwid sent to the server, and the learned server-minus-local clock offset in seconds. |
@@ -163,7 +163,7 @@ Immutable (frozen). Results of failed calls carry `ok === false`. Licensing outc
 | `requestId` | `string \| null` | Server request id. Quote it when contacting support. |
 | `serverTime` | `number \| null` | Authoritative server time from a signed response. |
 | `offline` | `boolean` | `true` when the result came from the stored lease. |
-| `retryAfter` | `number \| null` | Seconds to wait, for `rate_limited`. |
+| `retryAfter` | `number \| null` | Seconds the server asked to wait (`Retry-After`, delta-seconds or HTTP date) on every HTTP 429 or 503 answer, whatever its code: `rate_limited`, `network_error` for the empty 503 of a server whose database is unreachable (`Retry-After: 30`) or a gateway's 503, `internal_error` for 503 `service_busy`. The results of `validateWithOfflineFallback`'s fallback (offline `ok`, `lease_expired`, `lease_invalid`) carry the value of the failed online attempt, so you know when to try online again. `null` without the header, for every other status and for `validateOffline()`. |
 | `hasFeature(name)` | `boolean` | `ok && license.features.includes(name)`. Always `false` for failures. |
 | `expiresAt` | `Date \| null` | License expiry. |
 | `isLifetime` | `boolean` | The license has no expiry date. |
@@ -357,7 +357,10 @@ plus `trial: true` for a free-trial license (left out otherwise). Fields the SDK
   (`rate_limited` with `retryAfter`, `validation_error`, `ip_blocked`, `unknown_product`, …), redirects and
   `invalid_response` (for example a bad signature). When the fallback runs but finds no usable lease, the result is
   `lease_expired` (the stored lease expired) or `lease_invalid` (it failed verification and was deleted), and the
-  original online result when no lease is stored. Plain `validate()` never falls back.
+  original online result when no lease is stored. Plain `validate()` never falls back. A fallback result (offline
+  `ok`, `lease_expired`, `lease_invalid`) keeps the `retryAfter` of the failed online answer (for example 30 seconds
+  during a database outage, `null` when that answer had no `Retry-After`): wait that long before validating online
+  again.
 
   Falling back on an unsigned 5xx grants an attacker nothing: whoever can inject one can just as well drop the
   connection, which falls back too, and the lease itself is signed, bound to this device and expires.

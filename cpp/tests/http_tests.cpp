@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 
@@ -75,9 +76,13 @@ void run(const Setup& setup) {
   check_code(failing.validate("VX-INVALID"), "invalid_key", "signed business failure");
   check_code(failing.validate("VX-NONCE"), "invalid_response", "nonce mismatch");
   check_code(failing.validate("VX-BADSIG"), "invalid_response", "bad signature");
-  check_code(failing.validate("VX-429"), "rate_limited", "HTTP 429");
+  const auto limited_429 = failing.validate("VX-429");
+  check_code(limited_429, "rate_limited", "HTTP 429");
+  check(limited_429.retry_after == std::optional<std::int64_t>(30), "HTTP 429: retry_after from the Retry-After header");
   check_code(failing.validate("VX-400"), "validation_error", "HTTP 400");
-  check_code(failing.validate("VX-500"), "internal_error", "HTTP 500");
+  const auto error_500 = failing.validate("VX-500");
+  check_code(error_500, "internal_error", "HTTP 500");
+  check(!error_500.retry_after, "HTTP 500: no retry_after");
 
   velsigil::Client skewed = make_client(setup, setup.base_url, "http-test-hwid-skew", std::make_shared<velsigil::MemoryStore>());
   check_code(skewed.validate("VX-SKEW"), "ok", "clock_skew is corrected with one retry");
@@ -98,20 +103,26 @@ void run(const Setup& setup) {
   // 5xx, whatever its body (Velsigil error, HTML, empty), falls back too. validate() reports the real error, and
   // without a lease the fallback returns that error. 4xx answers never fall back.
   velsigil::Client degraded = make_client(setup, setup.base_url, "http-test-hwid-0001", store);
+  // `retry_after`: the mock's Retry-After (sent with VX-503 and VX-503J only), read by the libcurl transport.
   struct Outage {
     const char* key;
     const char* code;
+    std::optional<std::int64_t> retry_after;
   };
-  for (const Outage& outage : {Outage{"VX-500", "internal_error"}, Outage{"VX-503", "network_error"},
-                               Outage{"VX-503J", "internal_error"}, Outage{"VX-502", "network_error"},
-                               Outage{"VX-504", "network_error"}}) {
+  for (const Outage& outage : {Outage{"VX-500", "internal_error", std::nullopt}, Outage{"VX-503", "network_error", 30},
+                               Outage{"VX-503J", "internal_error", 5}, Outage{"VX-502", "network_error", std::nullopt},
+                               Outage{"VX-504", "network_error", std::nullopt}}) {
     const std::string key = outage.key;
-    check_code(degraded.validate(key), outage.code, key + ": validate() reports the outage");
+    const auto plain = degraded.validate(key);
+    check_code(plain, outage.code, key + ": validate() reports the outage");
+    check(plain.retry_after == outage.retry_after, key + ": validate() retry_after");
     const auto result = degraded.validate_with_offline_fallback(key);
     check(result.ok && result.offline && result.has_feature("pro"), key + ": offline fallback with the stored lease");
+    check(result.retry_after == outage.retry_after, key + ": the fallback carries the online retry_after");
     const auto no_lease = failing.validate_with_offline_fallback(key);
     check(!no_lease.offline, key + " without a lease: no offline result");
     check_code(no_lease, outage.code, key + " without a lease: the original error");
+    check(no_lease.retry_after == outage.retry_after, key + " without a lease: the original retry_after");
   }
   const auto limited = degraded.validate_with_offline_fallback("VX-429");
   check(!limited.offline, "HTTP 429 never falls back");

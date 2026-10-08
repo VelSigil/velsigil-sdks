@@ -36,7 +36,7 @@ namespace Velsigil.Client;
 public sealed class VelsigilClient : IDisposable
 {
     /// <summary>SDK version, sent in the User-Agent header.</summary>
-    public const string SdkVersion = "1.0.3";
+    public const string SdkVersion = "1.0.4";
 
     private const string TypeValidate = "validate";
     private const string TypeDeactivate = "deactivate";
@@ -345,7 +345,10 @@ public sealed class VelsigilClient : IDisposable
     /// <see cref="ResultCodes.InternalError"/>) is returned (as in every Velsigil SDK); a stored lease that is unusable
     /// gives <see cref="ResultCodes.LeaseExpired"/> or <see cref="ResultCodes.LeaseInvalid"/>. Check
     /// <see cref="VelsigilResult.Offline"/> to know which path was used. <see cref="ValidateAsync"/> itself never falls
-    /// back and always reports the real error.
+    /// back and always reports the real error. A result of the fallback (<see cref="ResultCodes.Ok"/>,
+    /// <see cref="ResultCodes.LeaseExpired"/>, <see cref="ResultCodes.LeaseInvalid"/>) carries the
+    /// <see cref="VelsigilResult.RetryAfter"/> of the failed online answer (the <c>Retry-After</c> of a 503, e.g. 30 s
+    /// while the server's database is unreachable), so the app knows when to try online again.
     /// </summary>
     public async Task<VelsigilResult> ValidateWithOfflineFallbackAsync(string licenseKey, ValidateOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -353,7 +356,8 @@ public sealed class VelsigilClient : IDisposable
         if (!IsServerUnavailable(online)) return online;
         var offline = ValidateOffline();
         // Without any stored lease the online failure is the more useful answer.
-        return string.Equals(offline.Code, ResultCodes.NoLease, StringComparison.Ordinal) ? online : offline;
+        if (string.Equals(offline.Code, ResultCodes.NoLease, StringComparison.Ordinal)) return online;
+        return offline.WithRetryAfter(online.RetryAfter);
     }
 
     // ---- Offline -----------------------------------------------------------------------------------
@@ -639,7 +643,10 @@ public sealed class VelsigilClient : IDisposable
             var errorBody = await HttpHelpers.ReadBodyAsync(response.Content, MaxErrorBodyBytes, timeout.Token).ConfigureAwait(false);
             var code = HttpHelpers.MapUnsignedErrorCode(status, errorBody, out var requestId, string.Equals(type, TypeTrial, StringComparison.Ordinal));
             requestId ??= HttpHelpers.ReadRequestIdHeader(response);
-            var retryAfter = string.Equals(code, ResultCodes.RateLimited, StringComparison.Ordinal)
+            // The Retry-After of every 429 or 503, whatever code it maps to (rate_limited; network_error for a gateway's
+            // 503 or the empty 503 of a server whose database is unreachable, CLIENT_PROTOCOL 5.3; internal_error for
+            // 503 service_busy). Identical in every Velsigil SDK.
+            var retryAfter = status == 429 || status == 503
                 ? HttpHelpers.ReadRetryAfter(response.Headers, _clock())
                 : null;
             return Exchange.Fail(VelsigilResult.Failure(code, HttpHelpers.MessageFor(code, status), CurrentUnixTime(), status, requestId, retryAfter));
@@ -807,8 +814,11 @@ public sealed class VelsigilClient : IDisposable
             case 429:
                 return VelsigilResult.Failure(ResultCodes.RateLimited, HttpHelpers.MessageFor(ResultCodes.RateLimited, status), now, status, requestId,
                     HttpHelpers.ReadRetryAfter(response.Headers, _clock()));
-            case 502:
             case 503:
+                // The Retry-After of every 429 and 503, as in SendAsync (e.g. 503 service_busy with Retry-After: 5).
+                return VelsigilResult.Failure(ResultCodes.NetworkError, HttpHelpers.MessageFor(ResultCodes.NetworkError, status), now, status, requestId,
+                    HttpHelpers.ReadRetryAfter(response.Headers, _clock()));
+            case 502:
             case 504:
                 return VelsigilResult.Failure(ResultCodes.NetworkError, HttpHelpers.MessageFor(ResultCodes.NetworkError, status), now, status, requestId);
             case 410:

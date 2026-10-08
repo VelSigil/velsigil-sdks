@@ -84,6 +84,8 @@ void print_result(const velsigil::ValidationResult& result) {
   std::cout << "ok=" << (result.ok ? "true" : "false") << " code=" << result.code << (result.offline ? " (offline)" : "") << '\n'
             << "message: " << result.message << '\n';
   if (result.request_id) std::cout << "request id: " << *result.request_id << '\n';
+  // The server's Retry-After (HTTP 429 or 503; also on an offline fallback result): when to try online again.
+  if (result.retry_after) std::cout << "retry after: " << *result.retry_after << " s\n";
   if (result.license) {
     std::cout << "plan: " << result.license->plan << ", status: " << result.license->status << '\n';
     if (result.is_lifetime()) {

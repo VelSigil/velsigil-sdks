@@ -1,5 +1,24 @@
 # Changelog - Velsigil Node.js SDK (`velsigil-client`)
 
+## 1.0.4 (2026-10-08)
+
+### Added
+
+- `result.retryAfter` is now set from the `Retry-After` header of **every** HTTP 429 or 503 answer, whatever code
+  it maps to, not only for `rate_limited`: also the empty 503 with `Retry-After: 30` that a self-hosted server
+  answers while its database is unreachable (`network_error`), a gateway's 503 (`network_error`), 503
+  `service_busy` (`internal_error`) and an oversized 503 (`invalid_response`). Parsed as before (delta-seconds or
+  HTTP date, whole seconds); `null` without the header and for every other status (500, 502, 504, …).
+  `validateWithOfflineFallback` copies the failed online answer's value onto the result of its fallback (offline
+  `ok`, `lease_expired`, `lease_invalid`), so an app running on its lease knows when to try online again;
+  `validateOffline()` called directly leaves it `null`. Result codes and the fallback rule are unchanged. The same
+  in every Velsigil SDK.
+
+### Changed
+
+- `retryAfter` is capped at one day (86400 seconds), as in the Python, C# and C++ SDKs: a longer delta or a later
+  HTTP date reads as 86400. Before, Node.js returned delta-seconds of up to 9 digits unchanged and ignored longer ones.
+
 ## 1.0.3 (2026-10-08)
 
 ### Fixed
@@ -9,9 +28,13 @@
   a gateway's HTML page, an empty, non-JSON or oversized body). Until now only `network_error` fell back, so while a
   self-hosted panel was up with its database down (500 `internal_error`, 503 `service_busy`), apps with a valid
   lease stopped working. 502/503/504 without a Velsigil error body already fell back (`network_error`). Signed
-  answers, 4xx (`rate_limited`, `validation_error`, …), redirects and `invalid_response` stay final. Without a
-  usable lease the result is unchanged: `lease_expired` / `lease_invalid`, or the original online result
-  (`internal_error`, `network_error`, …). Plain `validate()` and the result codes are unchanged; no new code.
+  answers, 4xx (`rate_limited`, `validation_error`, …), redirects and `invalid_response` stay final.
+  **Behaviour change to check in your app:** for an unsigned 5xx that did not fall back before, the method used to
+  return the online error (`internal_error`, or `invalid_response` for an oversized 5xx body); with a stored lease it
+  now returns an offline result (`offline: true`): `ok`, or `lease_expired` / `lease_invalid` when the stored lease
+  cannot be used, so code that handled `internal_error` from it must handle these codes too. Without any stored
+  lease it still returns the original online result (`internal_error`, `network_error`, …). Plain `validate()` and
+  the result codes are unchanged; no new code.
 
 ## 1.0.2 (2026-10-08)
 

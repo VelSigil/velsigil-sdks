@@ -15,7 +15,7 @@
 
     <!-- NuGet package metadata -->
     <PackageId>Velsigil.Client</PackageId>
-    <Version>1.0.3</Version>
+    <Version>1.0.4</Version>
     <Authors>Velsigil</Authors>
     <Company>Velsigil</Company>
     <Product>Velsigil</Product>

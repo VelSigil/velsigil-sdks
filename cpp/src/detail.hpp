@@ -121,6 +121,10 @@ std::optional<std::string> url_policy_error(std::string_view url, bool allow_ins
 bool is_loopback_url(std::string_view url);
 /// Current unix time in seconds from the system clock.
 std::int64_t system_unix_time() noexcept;
+/// Seconds to wait from a `Retry-After` header value (SPEC 14, the same rule in every Velsigil SDK): delta-seconds,
+/// or an HTTP-date (IMF-fixdate, RFC 850 or asctime form, RFC 9110 section 5.6.7) measured from `now_unix`, clamped
+/// to 0..86400 (one day). nullopt when `value` is neither.
+std::optional<std::int64_t> parse_retry_after(std::string_view value, std::int64_t now_unix) noexcept;
 
 /// velsigil::verify_envelope_typed and velsigil::verify_lease WITHOUT their refusal of the published
 /// test-vector keys (test-vectors.json keys.publicKey / keys.wrongPublicKey, whose private seeds are

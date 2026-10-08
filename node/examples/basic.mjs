@@ -96,13 +96,13 @@ const result = await client.validateWithOfflineFallback(licenseKey, {
 if (!result.ok) {
   console.error(`License check failed: ${result.code} - ${result.message}`);
   if (result.requestId) console.error(`Request id (for support): ${result.requestId}`);
-  if (result.code === 'rate_limited' && result.retryAfter !== null) {
-    console.error(`Retry in ${result.retryAfter} s.`);
-  }
+  // The server's Retry-After (any 429 or 503; also on an offline fallback result): when to try online again.
+  if (result.retryAfter !== null) console.error(`Retry in ${result.retryAfter} s.`);
   process.exit(1);
 }
 
 console.log(`License OK${result.offline ? ' (offline lease)' : ''}`);
+if (result.offline && result.retryAfter !== null) console.log(`  server asks to retry online in ${result.retryAfter} s`);
 console.log(`  plan:     ${result.license?.plan ?? 'n/a'}`);
 console.log(`  features: ${result.license?.features.join(', ') || '(none)'}`);
 if (result.isLifetime) {

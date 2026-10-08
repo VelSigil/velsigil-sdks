@@ -367,6 +367,14 @@ class VelsigilResult:
     offline: bool = False
     server_time: Optional[int] = None
     http_status: Optional[int] = None
+    #: Seconds to wait before trying the server again (0..86400), from the
+    #: ``Retry-After`` header of an HTTP 429 or 503 answer, whatever code it
+    #: maps to: ``rate_limited``, ``network_error`` (the server's empty 503
+    #: while its database is unreachable, or a gateway's 503) or the code of
+    #: a Velsigil error body (503 ``service_busy`` -> ``internal_error``).
+    #: :meth:`VelsigilClient.validate_with_offline_fallback` copies it to the
+    #: offline result it falls back to. ``None`` for every other answer and
+    #: when the header is absent or unparseable.
     retry_after: Optional[int] = None
     #: The license key of the free trial :meth:`VelsigilClient.start_trial`
     #: just started (``ok`` results of ``start_trial`` only; otherwise

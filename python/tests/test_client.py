@@ -447,6 +447,77 @@ class HttpErrorTests(ClientTestCase):
         self.assertEqual(result.http_status, 429)
         self.assertEqual(result.request_id, "3f2e1d0c-0000-4000-8000-000000000000")
 
+    def test_retry_after_on_every_429_and_503(self):
+        # SPEC 14 (1.0.4): the Retry-After of every 429 and 503 answer, whatever code it maps to; null otherwise.
+        def answer(status, body, retry_after=None):
+            return Reply(status, body, headers=None if retry_after is None else {"Retry-After": retry_after})
+
+        busy = {"error": {"code": "service_busy", "message": "Busy.", "requestId": "rid-busy"}}
+        internal = {"error": {"code": "internal_error"}}
+        limited = {"error": {"code": "rate_limited"}}
+        redirect = Reply(307, b"", headers={"Location": "http://127.0.0.1:9/x", "Retry-After": "30"})
+        cases = (
+            ("503 empty body (database unreachable)", answer(503, None, "30"), Code.NETWORK_ERROR, 30),
+            ("503 Velsigil service_busy", answer(503, busy, "5"), Code.INTERNAL_ERROR, 5),
+            ("503 Velsigil internal_error", answer(503, internal, "7"), Code.INTERNAL_ERROR, 7),
+            ("503 proxy HTML", answer(503, b"<html>Service Unavailable</html>", "120"), Code.NETWORK_ERROR, 120),
+            ("503 naming a 4xx code", answer(503, limited, "9"), Code.RATE_LIMITED, 9),
+            ("429 rate_limited", answer(429, limited, "30"), Code.RATE_LIMITED, 30),
+            ("429 without body", answer(429, b"", "12"), Code.RATE_LIMITED, 12),
+            ("503 without Retry-After", answer(503, None), Code.NETWORK_ERROR, None),
+            ("503 unparseable Retry-After", answer(503, None, "soon"), Code.NETWORK_ERROR, None),
+            # str.isdigit() accepts superscript digits, int() does not: such a header must not break the result.
+            ("503 non-ASCII digits", answer(503, None, "\u00b3"), Code.NETWORK_ERROR, None),
+            ("429 non-ASCII digits", answer(429, b"", "\u00b3"), Code.RATE_LIMITED, None),
+            ("429 negative delta", answer(429, b"", "-5"), Code.RATE_LIMITED, None),
+            ("503 delta capped at one day", answer(503, None, "999999999999"), Code.NETWORK_ERROR, 86400),
+            ("503 zero", answer(503, None, " 0 "), Code.NETWORK_ERROR, 0),
+            ("500 internal_error", answer(500, internal, "30"), Code.INTERNAL_ERROR, None),
+            ("502 proxy HTML", answer(502, b"<html>Bad Gateway</html>", "30"), Code.NETWORK_ERROR, None),
+            ("504 empty body", answer(504, b"", "30"), Code.NETWORK_ERROR, None),
+            ("400 validation_error", answer(400, {"error": {"code": "validation_error"}}, "30"), Code.VALIDATION_ERROR, None),
+            ("307 redirect", redirect, Code.INVALID_RESPONSE, None),
+        )
+        server = self.start(None)
+        client = self.make_client(server.url)
+        for name, reply, code, retry_after in cases:
+            with self.subTest(case=name):
+                server.handler = lambda request, r=reply: r
+                result = client.validate(LICENSE_KEY)
+                self.assertFailure(result, code)
+                self.assertEqual(result.retry_after, retry_after)
+                self.assertFalse(result.offline)
+
+    def test_retry_after_http_date(self):
+        clock = FakeClock(1767225600)  # Thu, 01 Jan 2026 00:00:00 GMT
+        server = self.start(None)
+        client = self.make_client(server.url, clock=clock)
+        cases = (
+            ("IMF-fixdate", "Thu, 01 Jan 2026 00:01:30 GMT", 503, 90),
+            ("IMF-fixdate on a 429", "Thu, 01 Jan 2026 00:00:45 GMT", 429, 45),
+            ("RFC 850", "Thursday, 01-Jan-26 00:02:00 GMT", 503, 120),
+            ("asctime", "Thu Jan  1 00:00:10 2026", 503, 10),
+            ("in the past", "Wed, 31 Dec 2025 23:59:00 GMT", 503, 0),
+            ("capped at one day", "Sat, 03 Jan 2026 00:00:00 GMT", 503, 86400),
+            ("invalid day", "Sat, 31 Feb 2026 00:00:00 GMT", 503, None),
+            ("not a date", "Thu, 01 Jan 2026 nope", 503, None),
+        )
+        for name, value, status, expected in cases:
+            with self.subTest(case=name):
+                server.handler = lambda request, s=status, v=value: Reply(s, None, headers={"Retry-After": v})
+                self.assertEqual(client.validate(LICENSE_KEY).retry_after, expected)
+        # A part second is rounded up, measured from the local clock (the learned server offset plays no part).
+        clock.now = 1767225600.25
+        server.handler = lambda request: Reply(503, None, headers={"Retry-After": "Thu, 01 Jan 2026 00:01:30 GMT"})
+        self.assertEqual(client.validate(LICENSE_KEY).retry_after, 90)
+
+    def test_retry_after_of_an_oversized_503(self):
+        server = self.start(lambda request: Reply(503, b"x" * (MAX_RESPONSE_BYTES + 1), headers={"Retry-After": "30"}))
+        result = self.make_client(server.url).validate(LICENSE_KEY)
+        self.assertFailure(result, Code.INVALID_RESPONSE)
+        self.assertEqual(result.http_status, 503)
+        self.assertEqual(result.retry_after, 30)
+
     def test_validation_error_400(self):
         server = self.start(self._error(400, "validation_error"))
         result = self.make_client(server.url).validate(LICENSE_KEY)
@@ -892,12 +963,95 @@ class ServerUnavailableFallbackTests(ClientTestCase):
     def test_empty_503_is_network_error_for_validate(self):
         # The server's "database unreachable" answer (503, Retry-After, empty body) is a transport-level
         # failure for this SDK's validate() too, as in 1.0.0-1.0.2 (502/503/504 without a Velsigil body).
+        # Since 1.0.4 its Retry-After is exposed as well (SPEC 14: every 429 and 503).
         self.logic.override = lambda request: Reply(503, None, headers={"Retry-After": "30"})
         client, _store = self._client(with_lease=False)
         result = client.validate(LICENSE_KEY)
         self.assertFailure(result, Code.NETWORK_ERROR)
         self.assertEqual(result.http_status, 503)
+        self.assertEqual(result.retry_after, 30)
+
+    def test_fallback_results_carry_the_online_retry_after(self):
+        # 1.0.4: when the fallback answers from the stored lease (ok, lease_expired, lease_invalid), the result
+        # carries the Retry-After of the failed online attempt, so the app knows when to try online again.
+        busy = {"error": {"code": "service_busy", "message": "Busy."}}
+        outages = (
+            ("503 empty body", lambda request: Reply(503, None, headers={"Retry-After": "30"}), 30),
+            ("503 Velsigil service_busy", lambda request: Reply(503, busy, headers={"Retry-After": "5"}), 5),
+            ("503 without Retry-After", lambda request: Reply(503, None), None),
+            (
+                "500 with Retry-After",
+                lambda request: Reply(500, {"error": {"code": "internal_error"}}, headers={"Retry-After": "30"}),
+                None,
+            ),
+            ("502 with Retry-After", lambda request: Reply(502, HTML_502, headers={"Retry-After": "30"}), None),
+        )
+        for name, reply, retry_after in outages:
+            with self.subTest(case=name, lease="usable"):
+                client, _store = self._client()
+                self.logic.override = reply
+                result = client.validate_with_offline_fallback(LICENSE_KEY)
+                self.assertTrue(result.ok and result.offline, result)
+                self.assertEqual(result.retry_after, retry_after)
+                # validate_offline() called directly knows nothing of an online attempt.
+                direct = client.validate_offline()
+                self.assertTrue(direct.ok and direct.offline, direct)
+                self.assertIsNone(direct.retry_after)
+            with self.subTest(case=name, lease="expired"):
+                client, _store = self._client()
+                self.clock.advance(86400)  # the lease's exp is reached
+                self.logic.override = reply
+                result = client.validate_with_offline_fallback(LICENSE_KEY)
+                self.assertFailure(result, Code.LEASE_EXPIRED)
+                self.assertTrue(result.offline)
+                self.assertEqual(result.retry_after, retry_after)
+                direct = client.validate_offline()
+                self.assertFailure(direct, Code.LEASE_EXPIRED)
+                self.assertIsNone(direct.retry_after)
+            with self.subTest(case=name, lease="invalid"):
+                store = MemoryStore()
+                foreign = make_lease(int(self.clock()) + 3600, hwid="someone-else-0001")
+                store.save(PRODUCT_ID, StoredState(lease_token=foreign))
+                client = self.make_client(self.server.url, store=store, clock=self.clock)
+                self.logic.override = reply
+                result = client.validate_with_offline_fallback(LICENSE_KEY)
+                self.assertFailure(result, Code.LEASE_INVALID)
+                self.assertEqual(result.retry_after, retry_after)
+                self.assertIsNone(client.validate_offline().retry_after)
+            with self.subTest(case=name, lease="none"):
+                # No stored lease: the online result itself, which already carries it.
+                client, _store = self._client(with_lease=False)
+                self.logic.override = reply
+                result = client.validate_with_offline_fallback(LICENSE_KEY)
+                self.assertFalse(result.ok or result.offline, result)
+                self.assertEqual(result.retry_after, retry_after)
+        # No HTTP answer at all: nothing to carry.
+        client, store = self._client()
+        refused = self.make_client(refused_url(), store=store, clock=self.clock)
+        result = refused.validate_with_offline_fallback(LICENSE_KEY)
+        self.assertTrue(result.ok and result.offline, result)
         self.assertIsNone(result.retry_after)
+        # 429 never falls back: the online result keeps its Retry-After.
+        self.logic.override = lambda request: Reply(429, {"error": {"code": "rate_limited"}}, headers={"Retry-After": "12"})
+        limited = client.validate_with_offline_fallback(LICENSE_KEY)
+        self.assertFailure(limited, Code.RATE_LIMITED)
+        self.assertFalse(limited.offline)
+        self.assertEqual(limited.retry_after, 12)
+
+    def test_a_failing_date_parser_does_not_break_a_503(self):
+        # email.utils raised errors other than ValueError on odd input in some 3.x releases. A Retry-After the
+        # parser chokes on is ignored: the 503 stays network_error with its http_status, so the fallback still
+        # applies (an escaping exception would have made it an invalid_response without http_status).
+        client, _store = self._client()
+        self.logic.override = lambda request: Reply(503, None, headers={"Retry-After": "Thu, 01 Jan 2026 12.34.56.78"})
+        with mock.patch.object(client_module, "parsedate_to_datetime", side_effect=UnboundLocalError("tz")):
+            plain = client.validate(LICENSE_KEY)
+            fallback = client.validate_with_offline_fallback(LICENSE_KEY)
+        self.assertFailure(plain, Code.NETWORK_ERROR)
+        self.assertEqual(plain.http_status, 503)
+        self.assertIsNone(plain.retry_after)
+        self.assertTrue(fallback.ok and fallback.offline, fallback)
+        self.assertIsNone(fallback.retry_after)
 
     def test_unsigned_5xx_without_a_lease_returns_the_original_error(self):
         client, store = self._client(with_lease=False)

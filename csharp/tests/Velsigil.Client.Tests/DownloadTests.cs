@@ -206,6 +206,26 @@ public class DownloadTests
         Assert.Equal(410, result.HttpStatus);
     }
 
+    [Theory]
+    [InlineData(503, "network_error", 5)]   // e.g. 503 service_busy with Retry-After: 5 (1.0.4: every 429 and 503)
+    [InlineData(429, "rate_limited", 5)]
+    [InlineData(502, "network_error", null)]
+    [InlineData(500, "download_failed", null)]
+    public async Task Download_file_exposes_the_retry_after_of_429_and_503(int status, string expected, int? seconds)
+    {
+        var server = CreateServer("/api/download/abc", FileBytes);
+        using var client = TestClients.Create(server);
+        var grant = (await client.GetDownloadAsync(Key)).Download!;
+        server.Respond(_ => Responses.Empty(status, ("Retry-After", "5")));
+
+        var result = await client.DownloadFileAsync(grant, Path.Combine(TestClients.TempDirectory(), "app.zip"));
+
+        Assert.False(result.Ok);
+        Assert.Equal(expected, result.Code);
+        Assert.Equal(status, result.HttpStatus);
+        Assert.Equal(seconds.HasValue ? TimeSpan.FromSeconds(seconds.Value) : (TimeSpan?)null, result.RetryAfter);
+    }
+
     [Fact]
     public async Task Download_requires_activation_server_side()
     {

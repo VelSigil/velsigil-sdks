@@ -216,7 +216,7 @@ The constructor never throws. Invalid arguments are recorded: `is_configured()` 
 | `ValidationResult check_update(const std::string& current_version)` | Latest published release in `result.update` (`no_release` when nothing is published). Sends no license data. |
 | `ValidationResult get_download(const std::string& license_key, const std::optional<std::string>& version = std::nullopt)` | Short-lived download descriptor in `result.download`. Requires an already activated device; never activates one. A grant whose URL violates the HTTPS policy (see `api_url`) is rejected as `invalid_response`, with no descriptor and nothing stored. |
 | `ValidationResult validate_offline()` | Verifies the stored offline lease without network access (`result.offline == true`). |
-| `ValidationResult validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& = {})` | Online validation first; the stored lease is used **only** when the server is unavailable: no HTTP response (`network_error`) or an unsigned HTTP 5xx whatever its body (`internal_error`, or `network_error` for a 502/503/504 without a Velsigil error body), e.g. while the server's database is down. Signed answers (`license_revoked`, ...), 4xx answers (`rate_limited`, `validation_error`, ...) and `invalid_response` are never overridden by the lease. When it falls back, the result is that of `validate_offline()` (`offline == true`): `ok`, or `lease_expired` / `lease_invalid` for a stored lease that cannot be used; only when no lease is stored is the original online result returned. See [When the offline fallback applies](#when-the-offline-fallback-applies). |
+| `ValidationResult validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& = {})` | Online validation first; the stored lease is used **only** when the server is unavailable: no HTTP response (`network_error`) or an unsigned HTTP 5xx whatever its body (`internal_error`, or `network_error` for a 502/503/504 without a Velsigil error body), e.g. while the server's database is down. Signed answers (`license_revoked`, ...), 4xx answers (`rate_limited`, `validation_error`, ...) and `invalid_response` are never overridden by the lease. When it falls back, the result is that of `validate_offline()` (`offline == true`): `ok`, or `lease_expired` / `lease_invalid` for a stored lease that cannot be used; only when no lease is stored is the original online result returned. A fallback result carries the failed online attempt's `retry_after`. See [When the offline fallback applies](#when-the-offline-fallback-applies). |
 | `DownloadFileResult download_release(const DownloadInfo&, const std::filesystem::path& destination)` | Streams the release to a temporary file next to `destination`, verifies size and SHA-256 against the signed descriptor, then renames it into place. |
 | `void clear_local_state()` | Forgets the stored device secret and lease for this product. Waits for a device-bound call in progress to finish first. |
 | `bool is_configured() const` / `std::string configuration_error() const` | Constructor validation result. |
@@ -253,6 +253,7 @@ Each request carries a fresh 32-byte CSPRNG nonce (base64url, 43 characters) and
 | `std::optional<std::string> request_id` | Server request id (quote it in support requests). |
 | `std::optional<std::int64_t> server_time` | Authoritative server time from the signed payload. |
 | `bool offline` | Result produced from the stored lease. |
+| `std::optional<std::int64_t> retry_after` | Seconds to wait before trying the server again (0..86400), from the `Retry-After` header of **every HTTP 429 or 503** answer, whatever its code: `rate_limited`, `network_error` (the server's empty 503 while its database is unreachable, or a gateway's 503) or `internal_error` (503 `service_busy`). Delta-seconds or an HTTP-date (measured from the client's clock); nullopt for other answers and when the header is missing or unreadable. `validate_with_offline_fallback()` copies it to the offline result it falls back to; `validate_offline()` called directly never sets it. |
 | `std::optional<std::string> trial_key` | The key of the trial `start_trial` just started (`ok` results of `start_trial` only). Sent once: store it immediately. |
 | `bool has_feature(std::string_view) const` | `true` only if `ok` and the license grants the feature. |
 | `expires_at()`, `is_lifetime()`, `seconds_until_expiry([now])`, `days_until_expiry([now])` | Expiry helpers. `seconds_until_expiry()` uses the system clock. `days_until_expiry` rounds **up** and, without an argument, measures at the result's own time (`server_time` online, `reference_time` = the time of the check offline): an N-day trial shows N right after `start_trial()`, 1 on its last day and 0 once expired (the same rule in every Velsigil SDK). |
@@ -290,7 +291,9 @@ Exceptions and failures from a store are contained by the client (persistence is
 
 ### Transport
 
-`ITransport::post_json(url, body, timeout) -> HttpResponse{ transport_ok, status, body, error }`.
+`ITransport::post_json(url, body, timeout) -> HttpResponse{ transport_ok, status, body, error, retry_after }`.
+`retry_after` is the raw `Retry-After` header value of the response, when it had one; a custom transport should
+set it too (without it, results carry no `retry_after`).
 `transport_ok == false` means no HTTP response arrived and maps to `network_error`. A custom transport reports
 every HTTP answer, 5xx included, with `transport_ok == true` and the real status; an unsigned 5xx then triggers the
 offline fallback just like `transport_ok == false`. The default libcurl
@@ -359,7 +362,7 @@ spoofable and is not a security boundary; the server-issued device secret and se
 | `ip_blocked` | unsigned 403 | Your IP is temporarily blocked. |
 | `unknown_product` | unsigned 404 | Wrong product id or server URL. |
 | `payload_too_large` / `unsupported_media_type` | unsigned 413/415 | Request rejected. |
-| `rate_limited` | unsigned 429 | Too many requests; retry later with backoff. |
+| `rate_limited` | unsigned 429 | Too many requests; retry later with backoff (`result.retry_after` holds the seconds when sent). |
 | `internal_error` | unsigned 5xx | Server error (also 502/503/504 **with** a Velsigil error body, e.g. `503 service_busy` while the database is busy or unreachable). From an HTTP 5xx it triggers the offline fallback. |
 | `network_error` | SDK | No HTTP response (DNS, connect, TLS, timeout) or a 502/503/504 gateway response without a Velsigil error body (an empty or HTML body). Always triggers the offline fallback. |
 | `invalid_response` | SDK | Unsigned, tampered, mismatched (nonce, product, `type` vs. endpoint, or a signed lease / `activation.hwidHash` of another device: the request was rewritten in transit and nothing from the response is stored) or malformed response, or a download grant whose URL violates the HTTPS policy. Never trust it. |
@@ -473,6 +476,10 @@ license and lease), with `offline == true`. Without a stored lease the online re
 | bad signature, another product or device, malformed | `lease_invalid` (the lease stays stored, as with `validate_offline()`) |
 | none | the original online result with its own code (`network_error` / `internal_error`), `offline == false`; not `no_lease` |
 
+Each result of the fallback (`ok`, `lease_expired`, `lease_invalid`) carries the `retry_after` of the failed online
+attempt: the `Retry-After` of a 503 (for example the server's `Retry-After: 30` while its database is
+unreachable), else nullopt. So an application running on its lease knows when to try online again.
+
 So a `lease_expired` or `lease_invalid` from `validate_with_offline_fallback()` also means that the server was
 unavailable; `validate()` reports that online error itself.
 
@@ -573,7 +580,8 @@ vectors through internal entry points (`src/detail.hpp`, not installed and not p
 - `velsigil_client_tests`: client behaviour against an in-process signing server (injected transport and
   clock, signing with a key pair generated for the run): ok, business failure, nonce mismatch, bad signature, wrong
   key, `clock_skew` + successful retry, device secret persisted and re-sent, 400/429/500 and other unsigned
-  errors, timeout, connection refused, offline fallback (valid, expired, invalid or no stored lease) and on
+  errors, `retry_after` (every 429 and 503, delta-seconds and HTTP-date), timeout, connection refused, offline
+  fallback (valid, expired, invalid or no stored lease, carrying the online `retry_after`) and on
   every unsigned 5xx (Velsigil error, HTML, empty or garbled body; never on signed or 4xx answers), the HTTPS
   policy for download
   grants (`get_download`) and `download_release`, configuration hardening (including the refusal of the

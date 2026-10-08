@@ -12,6 +12,8 @@ export interface HttpResponse {
 export interface HttpTooLarge {
   kind: 'too_large';
   status: number;
+  /** The answer's headers: an oversized 429/503 still carries its `Retry-After`. */
+  headers: Headers;
 }
 
 export interface HttpNetworkError {
@@ -55,7 +57,7 @@ export async function postJson(url: string, body: unknown, options: PostJsonOpti
     }
     try {
       const bytes = await readBody(response, options.maxResponseBytes);
-      if (bytes === null) return { kind: 'too_large', status: response.status };
+      if (bytes === null) return { kind: 'too_large', status: response.status, headers: response.headers };
       return { kind: 'response', status: response.status, headers: response.headers, body: bytes };
     } catch {
       return { kind: 'network_error', timedOut: controller.signal.aborted };
@@ -89,12 +91,18 @@ export async function readBody(response: Response, maxBytes: number): Promise<Ui
   return Buffer.concat(chunks, total);
 }
 
-/** Parses `Retry-After` (delta-seconds or HTTP date) into whole seconds. */
+/** Upper bound of a parsed `Retry-After` in seconds: one day, as in every Velsigil SDK (a longer wait reads as one day). */
+export const MAX_RETRY_AFTER_SECONDS = 86_400;
+
+/** Parses `Retry-After` (delta-seconds or HTTP date) into whole seconds, clamped to 0..86400 (one day). */
 export function parseRetryAfter(value: string | null, nowMs: number): number | null {
   if (value === null) return null;
   const trimmed = value.trim();
-  if (/^\d{1,9}$/.test(trimmed)) return Number(trimmed);
+  if (/^\d+$/.test(trimmed)) {
+    const digits = trimmed.replace(/^0+(?=\d)/, '');
+    return digits.length > 6 ? MAX_RETRY_AFTER_SECONDS : Math.min(Number(digits), MAX_RETRY_AFTER_SECONDS);
+  }
   const date = Date.parse(trimmed);
   if (Number.isNaN(date)) return null;
-  return Math.max(0, Math.ceil((date - nowMs) / 1000));
+  return Math.min(MAX_RETRY_AFTER_SECONDS, Math.max(0, Math.ceil((date - nowMs) / 1000)));
 }

@@ -1,5 +1,19 @@
 # Changelog - Velsigil .NET SDK (`Velsigil.Client`)
 
+## 1.0.4 (2026-10-08)
+
+### Added
+
+- `VelsigilResult.RetryAfter` is now set from the `Retry-After` header of **every** HTTP 429 or 503 answer,
+  whatever code it maps to, not only for `rate_limited`: also the empty 503 with `Retry-After: 30` that a
+  self-hosted server answers while its database is unreachable (`network_error`), a gateway's 503
+  (`network_error`), 503 `service_busy` (`internal_error`) and a 503 of `DownloadFileAsync` (`network_error`; it
+  already set it for a 429). Parsed as before (delta-seconds or HTTP date, capped at one day); null without the
+  header and for every other status (500, 502, 504, ...). `ValidateWithOfflineFallbackAsync` copies the failed
+  online answer's value onto the result of its fallback (offline `ok`, `lease_expired`, `lease_invalid`), so an app
+  running on its lease knows when to try online again; `ValidateOffline()` called directly leaves it null. The type
+  stays `TimeSpan?`; result codes and the fallback rule are unchanged. The same in every Velsigil SDK.
+
 ## 1.0.3 (2026-10-08)
 
 ### Fixed
@@ -13,6 +27,10 @@
   `validation_error`, ..., even one whose body says `internal_error`) and `invalid_response` stay final. Without a
   stored lease the original result (`internal_error` or `network_error`, with its `HttpStatus` and `RequestId`) is
   returned; an expired or invalid lease gives `lease_expired` / `lease_invalid`, as for `network_error`.
+  **Behaviour change to check in your app:** for an unsigned 5xx that did not fall back before, the method used to
+  return `internal_error`; with a stored lease it now returns an offline result (`Offline` is true): `ok`, or
+  `lease_expired` / `lease_invalid` when the stored lease cannot be used, so code that handled `internal_error` from
+  it must handle these codes too.
   `ValidateAsync` and the result codes are unchanged (no new code): it still reports `internal_error` for these
   answers. Falling back on an unsigned 5xx is as safe as on a dropped connection, which an attacker can cause
   just as easily; the lease is signed, bound to the device and time-limited.

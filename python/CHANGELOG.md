@@ -1,5 +1,27 @@
 # Changelog - Velsigil Python SDK (`velsigil-client`)
 
+## 1.0.4 (2026-10-08)
+
+### Added
+
+- `VelsigilResult.retry_after` is now set from the `Retry-After` header of every HTTP 429 **and 503** answer,
+  whatever code it maps to: `rate_limited` as before, `network_error` for the server's empty 503 while its
+  database is unreachable (`Retry-After: 30`) or a gateway's 503, and the code of a Velsigil error body such as
+  503 `service_busy` (`internal_error`); also the `invalid_response` of an oversized 429 or 503 body. Before, it
+  was set for `rate_limited` only, so an app could not tell when to try again during a database outage. The
+  header is read as delta-seconds or, new, as an HTTP-date (rounded up, measured from the local clock); the value
+  stays clamped to 0..86400 seconds. Every other status still gives `None`. The same rule in every Velsigil SDK
+  (SPEC 14).
+- `validate_with_offline_fallback()`: a result it falls back to (`ok` with `offline=True`, `lease_expired`,
+  `lease_invalid`) now carries the `retry_after` of the failed online attempt, so an app running on its offline
+  lease knows when to try online again. Without a stored lease the online result is returned as before (it carries
+  its own `retry_after`); `validate_offline()` called directly is unchanged (`retry_after` is `None`).
+
+### Fixed
+
+- A `Retry-After` header made of non-ASCII digits (for example U+00B3 SUPERSCRIPT THREE, which `str.isdigit()`
+  accepts) no longer turns a 429 answer into `invalid_response`; it is ignored like any unparseable value.
+
 ## 1.0.3 (2026-10-08)
 
 ### Fixed
@@ -21,6 +43,9 @@
   `network_error` / `internal_error` with the lease status appended to its message. Only when no lease is stored
   at all is the original online result returned, now unchanged (its message no longer names `no_lease`). This is
   the cross-SDK rule (CLIENT_PROTOCOL section 9), as in the Node and C# SDKs. `validate()` is unchanged.
+  **Upgrading from 1.0.2:** an app that reacted to `network_error` / `internal_error` from this call ("cannot reach
+  the license server") must also handle `lease_expired` and `lease_invalid` with `offline=True` ("connect to renew
+  the license"), which it now gets instead whenever the server is unavailable and the stored lease is unusable.
 
 ## 1.0.2 (2026-10-08)
 
