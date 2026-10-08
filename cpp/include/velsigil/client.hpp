@@ -33,7 +33,7 @@
 namespace velsigil {
 
 /// SDK version (semantic versioning).
-inline constexpr char kSdkVersion[] = "1.0.1";
+inline constexpr char kSdkVersion[] = "1.0.2";
 
 /// Result codes. Server codes are defined in SPEC section 10.3; the SDK adds a few local ones.
 namespace codes {
@@ -355,7 +355,13 @@ struct ClientOptions {
 };
 
 // ---------------------------------------------------------------------------------------------
-// Low-level verification helpers (used by the Client; exposed for custom integrations and tests)
+// Low-level verification helpers (exposed for custom integrations)
+//
+// They refuse the two public keys of the SDK test vectors (test-vectors.json keys.publicKey and
+// keys.wrongPublicKey, in any base64 spelling) like an invalid public key, ALWAYS: their private keys are
+// published, so anyone could forge answers that verify with them, and unlike the Client (which accepts them
+// for a localhost, 127.0.0.1 or [::1] API URL) these helpers have no API URL that could name a local test
+// server. Use your product's public key (panel: Products > your product > Integration).
 // ---------------------------------------------------------------------------------------------
 
 /// `hwid_mismatch`: the signed lease or `activation.hwidHash` belongs to another device than the one
@@ -382,6 +388,9 @@ struct EnvelopeVerification {
 /// is `hwid_mismatch` (a lease of another product: `product_mismatch`). Pass an empty `expected_hwid`
 /// for update checks, which are not device-bound.
 ///
+/// An invalid `public_key_base64` and the published test-vector keys (see above) yield `invalid_signature`
+/// with an empty `payload_json`.
+///
 /// Deliberately a name of its own with exactly one signature and no default arguments: a call that
 /// leaves out an argument does not compile, and it can never bind to one of the removed type-less
 /// `verify_envelope` overloads below (where a fifth argument meant as the type would be taken as the
@@ -396,7 +405,8 @@ EnvelopeVerification verify_envelope_typed(std::string_view envelope_json, std::
 // releases before 2026-10-06, still [[deprecated]] and still UNSAFE. See CHANGELOG.md.
 
 namespace untyped_detail {
-/// Implementation of the opt-in overloads below (no `type` check). Not part of the API.
+/// Implementation of the opt-in overloads below (no `type` check; refuses the published test-vector keys
+/// like verify_envelope_typed). Not part of the API.
 EnvelopeVerification verify_envelope_untyped(std::string_view envelope_json, std::string_view public_key_base64,
                                              std::string_view expected_nonce, std::string_view expected_product_id,
                                              std::string_view expected_hwid) noexcept;
@@ -455,7 +465,8 @@ struct LeaseVerification {
 };
 
 /// Verifies an offline lease token (SPEC 10.4) for `product_id` and the raw `hwid` string at time
-/// `now_unix`. Signature first, then structure/type, product, device and expiry.
+/// `now_unix`. Signature first, then structure/type, product, device and expiry. An invalid
+/// `public_key_base64` and the published test-vector keys (see above) yield `invalid_signature` without claims.
 LeaseVerification verify_lease(std::string_view token, std::string_view public_key_base64, std::string_view product_id,
                                std::string_view hwid, std::int64_t now_unix) noexcept;
 
@@ -475,7 +486,9 @@ class Client {
  public:
   /// `api_url`: your Velsigil origin, e.g. "https://licenses.example.com" (a URL that already ends in
   /// "/api/client/v1" is accepted too). `product_id`: the product UUID. `public_key_base64`: the
-  /// product's Ed25519 public key (standard base64) - keep it compiled into your binary.
+  /// product's Ed25519 public key (standard base64) - keep it compiled into your binary. The public test
+  /// keys of the SDK test vectors, whose private keys are published, are refused like an invalid key unless
+  /// the host of `api_url` is localhost, 127.0.0.1 or [::1] (a local test server).
   /// The constructor never throws; invalid arguments make every call return `invalid_configuration`.
   Client(std::string api_url, std::string product_id, std::string public_key_base64, ClientOptions options = {});
   ~Client();

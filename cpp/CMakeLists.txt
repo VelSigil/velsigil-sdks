@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(velsigil
-  VERSION 1.0.1
+  VERSION 1.0.2
   DESCRIPTION "Velsigil license client SDK for C++17"
   LANGUAGES CXX)
 
@@ -113,9 +113,11 @@ if(VX_BUILD_TESTS)
     message(FATAL_ERROR "VX_TEST_VECTORS: ${VX_TEST_VECTORS} does not exist. Pass -DVX_TEST_VECTORS=<path to test-vectors.json> or -DVX_BUILD_TESTS=OFF.")
   endif()
 
-  # Conformance with the shared test vectors (mandatory; public API only).
+  # Conformance with the shared test vectors (mandatory). The public low-level helpers refuse the published
+  # test-vector keys, so the vectors are verified through the internal entry points of src/detail.hpp.
   add_executable(velsigil_vector_tests tests/vector_tests.cpp)
   target_link_libraries(velsigil_vector_tests PRIVATE velsigil::velsigil nlohmann_json::nlohmann_json)
+  target_include_directories(velsigil_vector_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_definitions(velsigil_vector_tests PRIVATE VX_TEST_VECTORS_PATH="${VX_TEST_VECTORS}")
   add_test(NAME velsigil_vector_tests COMMAND velsigil_vector_tests)
 
@@ -128,8 +130,10 @@ if(VX_BUILD_TESTS)
 
   # The opt-in type-less verify_envelope overloads (VELSIGIL_ALLOW_UNTYPED_ENVELOPE; deleted without it).
   add_executable(velsigil_untyped_optin_tests tests/untyped_optin_tests.cpp)
-  target_link_libraries(velsigil_untyped_optin_tests PRIVATE velsigil::velsigil)
-  target_compile_definitions(velsigil_untyped_optin_tests PRIVATE VELSIGIL_ALLOW_UNTYPED_ENVELOPE)
+  target_link_libraries(velsigil_untyped_optin_tests PRIVATE velsigil::velsigil nlohmann_json::nlohmann_json)
+  target_include_directories(velsigil_untyped_optin_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(velsigil_untyped_optin_tests PRIVATE VELSIGIL_ALLOW_UNTYPED_ENVELOPE
+                             VX_TEST_VECTORS_PATH="${VX_TEST_VECTORS}")
   add_test(NAME velsigil_untyped_optin_tests COMMAND velsigil_untyped_optin_tests)
 
   foreach(vx_test IN ITEMS velsigil_vector_tests velsigil_client_tests velsigil_untyped_optin_tests)

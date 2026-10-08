@@ -1,4 +1,5 @@
 using System;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using Org.BouncyCastle.Crypto.Parameters;
@@ -19,6 +20,9 @@ internal sealed class TestSigner
     {
         _key = new Ed25519PrivateKeyParameters(Convert.FromBase64String(seedBase64), 0);
     }
+
+    /// <summary>A signer with a freshly generated key: unlike the vector keys, usable with any API URL.</summary>
+    public static TestSigner Random() => new TestSigner(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
 
     public string PublicKeyBase64 => Convert.ToBase64String(_key.GeneratePublicKey().GetEncoded());
 

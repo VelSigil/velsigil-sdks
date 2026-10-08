@@ -84,7 +84,7 @@ public class DownloadTests
         Assert.Equal(FileBytes, File.ReadAllBytes(destination));
         Assert.Equal(FileBytes.Length, progress.Last());
         Assert.Equal(new[] { "app.zip" }, Directory.GetFiles(directory).Select(Path.GetFileName));
-        Assert.Equal("https://licenses.example.test/api/download/abc", server.Requests.Last().Uri.ToString());
+        Assert.Equal(TestClients.ApiUrl + "/api/download/abc", server.Requests.Last().Uri.ToString());
     }
 
     [Theory]

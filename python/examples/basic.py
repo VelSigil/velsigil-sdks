@@ -6,12 +6,12 @@ Usage::
     python examples/basic.py --license-key ... --download ./downloads/app.zip
     python examples/basic.py --deactivate --license-key ...
 
-Replace API_URL, PRODUCT_ID and PUBLIC_KEY with the values from the product's
-"Integration" tab in the Velsigil panel. The public key is deliberately a
-constant in code: loading it from a file or environment variable would let a
-user swap in their own key and sign their own "valid" responses. (The
-``VELSIGIL_*`` environment overrides below exist only so the example can be
-pointed at a test server; do not ship them.)
+Set API_URL, PRODUCT_ID and PUBLIC_KEY below to the values from the product's
+"Integration" tab in the Velsigil panel (Products > your product > Integration).
+While any of them is still a placeholder, the example prints a usage message
+and exits with code 2. They are deliberately constants in code: loading the
+public key from a file or an environment variable would let a user swap in
+their own key and sign their own "valid" responses.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ import argparse
 import logging
 import os
 import sys
+import urllib.parse
+from typing import Tuple
 
 # Allow running from a source checkout without installing the package.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -33,10 +35,25 @@ from velsigil_client import (  # noqa: E402
     default_store_path,
 )
 
-API_URL = os.environ.get("VELSIGIL_API_URL", "https://licenses.example.com")
-PRODUCT_ID = os.environ.get("VELSIGIL_PRODUCT_ID", "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b")
-PUBLIC_KEY = os.environ.get("VELSIGIL_PUBLIC_KEY", "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=")
+# Replace these placeholders with your product's values (panel: Products > your product > Integration) and
+# keep them compiled into your application. The public key is the trust anchor that makes forged server
+# responses detectable: never load it from a file, an environment variable or the network.
+API_URL = "<your Velsigil server URL>"  # e.g. "https://licenses.example.com"
+PRODUCT_ID = "<your product id>"
+PUBLIC_KEY = "<your product's public key>"
 APP_VERSION = "1.2.0"
+
+#: Hosts for which the local-testing environment overrides below are honoured (the SDK's loopback hosts).
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+OVERRIDE_VARIABLES = ("VELSIGIL_API_URL", "VELSIGIL_PRODUCT_ID", "VELSIGIL_PUBLIC_KEY")
+
+USAGE = (
+    "Usage: set API_URL, PRODUCT_ID and PUBLIC_KEY at the top of examples/basic.py to your product's values\n"
+    "from the Velsigil panel (Products > your product > Integration), then run\n"
+    "  python examples/basic.py --license-key <your license key>\n"
+    "Local testing only: VELSIGIL_API_URL, VELSIGIL_PRODUCT_ID and VELSIGIL_PUBLIC_KEY override them when the\n"
+    "API URL is loopback (localhost, 127.0.0.1, [::1])."
+)
 
 #: Human-friendly text for the codes an end user is most likely to see.
 FRIENDLY = {
@@ -53,6 +70,45 @@ FRIENDLY = {
 }
 
 
+def is_placeholder(value: str) -> bool:
+    """True for an empty value or one that still holds its "<...>" placeholder."""
+    value = value.strip()
+    return not value or (value.startswith("<") and value.endswith(">"))
+
+
+def is_loopback_url(url: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url.strip()).hostname
+    except ValueError:
+        return False
+    return (host or "").lower() in LOOPBACK_HOSTS
+
+
+def configuration() -> Tuple[str, str, str]:
+    """The compiled-in API_URL, PRODUCT_ID and PUBLIC_KEY.
+
+    Local testing only (remove this from a real application): the VELSIGIL_API_URL,
+    VELSIGIL_PRODUCT_ID and VELSIGIL_PUBLIC_KEY environment variables override them ONLY when the
+    resulting API URL is loopback (localhost, 127.0.0.1, [::1]), for example a panel dev server on
+    http://localhost:3000. For any other server they are ignored, so the environment can never point
+    the example at another server or make it trust another key.
+    """
+    api_url = os.environ.get("VELSIGIL_API_URL") or API_URL
+    if not is_loopback_url(api_url):
+        if any(os.environ.get(name) for name in OVERRIDE_VARIABLES):
+            print(
+                "Ignoring the VELSIGIL_* overrides: they apply only to a loopback API URL "
+                "(localhost, 127.0.0.1, [::1]).",
+                file=sys.stderr,
+            )
+        return API_URL, PRODUCT_ID, PUBLIC_KEY
+    return (
+        api_url,
+        os.environ.get("VELSIGIL_PRODUCT_ID") or PRODUCT_ID,
+        os.environ.get("VELSIGIL_PUBLIC_KEY") or PUBLIC_KEY,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Velsigil client example")
     parser.add_argument("--license-key", default=os.environ.get("VELSIGIL_LICENSE_KEY"), help="license key to validate")
@@ -62,20 +118,24 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(message)s")
 
+    api_url, product_id, public_key = configuration()
+    if any(is_placeholder(value) for value in (api_url, product_id, public_key)):
+        print(USAGE, file=sys.stderr)
+        return 2
+
     license_key = args.license_key or input("License key: ").strip()
 
     try:
         client = VelsigilClient(
-            API_URL,
-            PRODUCT_ID,
-            PUBLIC_KEY,
+            api_url,
+            product_id,
+            public_key,
             # Persist the device secret and offline lease across restarts.
             store=FileStore(default_store_path("VelsigilExample")),
-            # Only for local test servers; never in production builds.
-            allow_insecure_http=os.environ.get("VELSIGIL_ALLOW_INSECURE_HTTP") == "1",
         )
     except VelsigilError as exc:
         print("Configuration problem: %s" % exc, file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         return 2
 
     if args.deactivate:

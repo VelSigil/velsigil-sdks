@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Velsigil.Client;
@@ -13,29 +14,44 @@ namespace ConsoleExample;
 ///
 ///   dotnet run --project examples/ConsoleExample -- [validate|offline|update|download &lt;file&gt;|deactivate]
 ///
-/// Configuration (environment variables, for this demo only):
-///   VELSIGIL_URL           https://licenses.example.com   (http only for localhost)
-///   VELSIGIL_PRODUCT_ID    product UUID from the panel
-///   VELSIGIL_PUBLIC_KEY    product public key (base64) from the panel's Integration tab
-///   VELSIGIL_LICENSE_KEY   optional; prompted when missing
-///   VELSIGIL_APP_VERSION   optional, defaults to 1.0.0
+/// Set <see cref="ApiUrl"/>, <see cref="ProductId"/> and <see cref="PublicKey"/> below to your product's values and
+/// rebuild. While a placeholder (a value in angle brackets) is still in place, the example prints a usage message and
+/// exits with code 2.
 ///
-/// In a real application the product id and public key are compiled-in constants: never load the
-/// public key from a file, the registry or the network, or an attacker can swap it for their own.
+/// Optional environment variables (neither one is a trust anchor):
+///   VELSIGIL_LICENSE_KEY   the license key; prompted when missing, never printed
+///   VELSIGIL_APP_VERSION   defaults to 1.0.0
+///
+/// Local testing only: VELSIGIL_URL, VELSIGIL_PRODUCT_ID and VELSIGIL_PUBLIC_KEY override the three constants, and
+/// only when the API URL (VELSIGIL_URL, or ApiUrl when VELSIGIL_URL is not set) is loopback: host localhost,
+/// 127.0.0.1 or [::1], e.g. a development server on this machine. For any other URL the example refuses to start
+/// (exit code 2) instead of trusting a server or public key taken from the environment.
+///
+/// In a real application the API URL, product id and public key are compiled-in constants: never load the public
+/// key from a file, the registry, an environment variable or the network, or an attacker can swap it for their own.
 /// </summary>
 internal static class Program
 {
+    // Replace these with the values from the Velsigil panel (Products > your product > Integration). Keep them
+    // compiled in: the public key is the trust anchor that makes forged server responses detectable.
+    private const string ApiUrl = "<your Velsigil server URL, e.g. https://licenses.example.com>";
+    private const string ProductId = "<your product id>";
+    private const string PublicKey = "<your product's public key>";
+
+    private const string Usage =
+        "usage: dotnet run --project examples/ConsoleExample -- [validate|offline|update|download <file>|deactivate]\n" +
+        "Set ApiUrl, ProductId and PublicKey in examples/ConsoleExample/Program.cs to your product's values from the\n" +
+        "Velsigil panel (Products > your product > Integration), then rebuild. For a server on this machine only\n" +
+        "(localhost, 127.0.0.1 or [::1]), VELSIGIL_URL, VELSIGIL_PRODUCT_ID and VELSIGIL_PUBLIC_KEY can override them.";
+
     private static async Task<int> Main(string[] args)
     {
         var command = args.Length > 0 ? args[0].ToLowerInvariant() : "validate";
-        var apiUrl = Environment.GetEnvironmentVariable("VELSIGIL_URL");
-        var productId = Environment.GetEnvironmentVariable("VELSIGIL_PRODUCT_ID");
-        var publicKey = Environment.GetEnvironmentVariable("VELSIGIL_PUBLIC_KEY");
         var appVersion = Environment.GetEnvironmentVariable("VELSIGIL_APP_VERSION") ?? "1.0.0";
 
-        if (string.IsNullOrEmpty(apiUrl) || string.IsNullOrEmpty(productId) || string.IsNullOrEmpty(publicKey))
+        if (!TryResolveConfiguration(out var apiUrl, out var productId, out var publicKey))
         {
-            Console.Error.WriteLine("Set VELSIGIL_URL, VELSIGIL_PRODUCT_ID and VELSIGIL_PUBLIC_KEY (see Program.cs).");
+            Console.Error.WriteLine(Usage);
             return 2;
         }
 
@@ -46,14 +62,8 @@ internal static class Program
             cancel.Cancel();
         };
 
-        // One long-lived client per product. The FileStore keeps the device secret and offline lease in a
-        // per-user directory with owner-only permissions.
-        using var client = new VelsigilClient(apiUrl, productId, publicKey, new VelsigilClientOptions
-        {
-            Store = FileStore.CreateDefault("ConsoleExample"),
-            Timeout = TimeSpan.FromSeconds(15),
-            StoreErrorHandler = error => Console.Error.WriteLine("warning: license state could not be saved (" + error.GetType().Name + ")"),
-        });
+        using var client = CreateClient(apiUrl, productId, publicKey);
+        if (client is null) return 2;
 
         Console.WriteLine("Hardware id : " + client.HardwareId);
         Console.WriteLine("Key id      : " + client.KeyId);
@@ -89,6 +99,69 @@ internal static class Program
         {
             Console.Error.WriteLine("Cancelled.");
             return 130;
+        }
+    }
+
+    // The compiled-in constants, or (local testing only) the environment override, which is honoured only when the
+    // API URL is loopback. False when the example cannot run: a placeholder is still in place, or an override was
+    // given for a non-loopback URL (reported here; the caller prints the usage message).
+    private static bool TryResolveConfiguration(out string apiUrl, out string productId, out string publicKey)
+    {
+        var urlOverride = EnvironmentOverride("VELSIGIL_URL");
+        var productIdOverride = EnvironmentOverride("VELSIGIL_PRODUCT_ID");
+        var publicKeyOverride = EnvironmentOverride("VELSIGIL_PUBLIC_KEY");
+
+        apiUrl = urlOverride ?? ApiUrl;
+        productId = productIdOverride ?? ProductId;
+        publicKey = publicKeyOverride ?? PublicKey;
+
+        if ((urlOverride != null || productIdOverride != null || publicKeyOverride != null) && !IsLoopbackUrl(apiUrl))
+        {
+            Console.Error.WriteLine("VELSIGIL_URL, VELSIGIL_PRODUCT_ID and VELSIGIL_PUBLIC_KEY are for local testing and are honoured only " +
+                "when the API URL is loopback (localhost, 127.0.0.1 or [::1]).");
+            return false;
+        }
+
+        return !IsPlaceholder(apiUrl) && !IsPlaceholder(productId) && !IsPlaceholder(publicKey);
+    }
+
+    private static string? EnvironmentOverride(string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    // The placeholders above are in angle brackets; no real URL, product id or base64 key contains '<'.
+    private static bool IsPlaceholder(string value) => string.IsNullOrWhiteSpace(value) || value.IndexOf('<') >= 0;
+
+    // The same loopback set as the SDK's plain-http and test-key rules: localhost, 127.0.0.1 and ::1, over http or https.
+    private static bool IsLoopbackUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return false;
+        if (string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)) return true;
+        return IPAddress.TryParse(uri.Host.Trim('[', ']'), out var address)
+            && (address.Equals(IPAddress.Loopback) || address.Equals(IPAddress.IPv6Loopback));
+    }
+
+    private static VelsigilClient? CreateClient(string apiUrl, string productId, string publicKey)
+    {
+        try
+        {
+            // One long-lived client per product. The FileStore keeps the device secret and offline lease in a
+            // per-user directory with owner-only permissions.
+            return new VelsigilClient(apiUrl, productId, publicKey, new VelsigilClientOptions
+            {
+                Store = FileStore.CreateDefault("ConsoleExample"),
+                Timeout = TimeSpan.FromSeconds(15),
+                StoreErrorHandler = error => Console.Error.WriteLine("warning: license state could not be saved (" + error.GetType().Name + ")"),
+            });
+        }
+        catch (ArgumentException error)
+        {
+            // A malformed URL, product id or key, or a public key of the SDK test vectors with a non-localhost URL.
+            Console.Error.WriteLine("Invalid configuration: " + error.Message);
+            return null;
         }
     }
 

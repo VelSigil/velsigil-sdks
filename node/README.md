@@ -62,7 +62,7 @@ import { VelsigilClient, FileStore, defaultStoreDirectory } from 'velsigil-clien
 // Embed these in your code. Never load the public key from a file or setting the user can change.
 const API_URL = 'https://licenses.example.com';
 const PRODUCT_ID = '0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b';
-const PUBLIC_KEY = 'I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI='; // the SDKs' public TEST key: use your product's key
+const PUBLIC_KEY = "<your product's public key>"; // base64, from Products → your product → Integration
 
 const client = new VelsigilClient(API_URL, PRODUCT_ID, PUBLIC_KEY, {
   store: new FileStore(defaultStoreDirectory('MyApp')), // persists device secret + offline lease
@@ -83,12 +83,20 @@ if (result.hasFeature('pro')) enableProFeatures();
 console.log(`Licensed (${result.license?.plan}), ${result.daysRemaining() ?? '∞'} days left`);
 ```
 
-A runnable example lives in [`examples/basic.mjs`](https://github.com/VelSigil/velsigil-sdks/blob/main/node/examples/basic.mjs):
+A runnable example lives in [`examples/basic.mjs`](https://github.com/VelSigil/velsigil-sdks/blob/main/node/examples/basic.mjs).
+Like a real app, it keeps the API URL, product id and public key as constants in its code: set `API_URL`,
+`PRODUCT_ID` and `PUBLIC_KEY` at the top of the file (until then it prints a usage message and exits with code 2),
+then:
 
 ```bash
 npm run build
-VELSIGIL_API_URL=https://licenses.example.com VELSIGIL_PRODUCT_ID=... VELSIGIL_PUBLIC_KEY=... VELSIGIL_LICENSE_KEY=... node examples/basic.mjs
+VELSIGIL_LICENSE_KEY=... node examples/basic.mjs
 ```
+
+For local testing only, `VELSIGIL_API_URL`, `VELSIGIL_PRODUCT_ID` and `VELSIGIL_PUBLIC_KEY` can replace the three
+constants, but the example accepts them only when the API URL is a loopback URL (`localhost`, `127.0.0.1` or
+`[::1]`), for example a local panel or mock server; with any other URL it refuses them and exits with code 2.
+Leave this override out of a real application.
 
 ## Configuration
 
@@ -100,7 +108,7 @@ new VelsigilClient(apiUrl: string, productId: string, publicKeyBase64: string, o
 |---|---|
 | `apiUrl` | Your Velsigil server, e.g. `https://licenses.example.com`. The SDK appends `/api/client/v1`; a URL that already ends in `/api/client/v1` is accepted as is. **HTTPS is required**, except for `localhost`, `127.0.0.1` and `[::1]`. No credentials, query string or fragment. |
 | `productId` | Product UUID. |
-| `publicKeyBase64` | The product's Ed25519 public key (standard base64 of the raw 32 bytes, as shown in the panel). It is the **only** key the client trusts; the `kid` field of responses is never used to pick a key. |
+| `publicKeyBase64` | The product's Ed25519 public key (standard base64 of the raw 32 bytes, as shown in the panel). It is the **only** key the client trusts; the `kid` field of responses is never used to pick a key. The public test keys of the SDK test vectors are refused outside loopback hosts (see [Protocol notes](#protocol-notes-and-test-vectors)). |
 
 | Option | Default | Description |
 |---|---|---|
@@ -114,8 +122,9 @@ new VelsigilClient(apiUrl: string, productId: string, publicKeyBase64: string, o
 | `maxResponseBytes` | `1048576` | Larger responses are rejected as `invalid_response`. |
 
 The constructor **throws** `VelsigilError` (with `code` set to `invalid_configuration`, `invalid_public_key` or
-`hwid_unavailable`) for configuration mistakes. That is the only place the SDK throws. Every network
-call resolves to a result instead.
+`hwid_unavailable`) for configuration mistakes. That is the only place the client throws (the
+[low-level helpers](#low-level-helpers) throw for an invalid or published test key). Every network call resolves to a
+result instead.
 
 ## API reference
 
@@ -186,12 +195,19 @@ receive license keys.
 
 ### Low-level helpers
 
+`verifyEnvelope`, `verifyLease` and `parsePublicKey` take the product's public key (`verifyEnvelope` and
+`verifyLease` accept the base64 string or an imported `KeyObject`) and throw `VelsigilError('invalid_public_key')`
+for an invalid one. They also refuse the two public test keys of the SDK test vectors (`keys.publicKey` and
+`keys.wrongPublicKey` in `test-vectors.json`, in any base64 form or as a `KeyObject`), whose private keys are
+published, with the same error and message as the `VelsigilClient` constructor. Unlike the constructor they have
+no API URL, so there is no loopback exception: they refuse these keys always, before anything is verified.
+
 | Export | Description |
 |---|---|
-| `verifyEnvelope(publicKey, envelope, { nonce, productId, type, hwid? })` | Returns `{ status: 'valid', payload }` or one of `invalid_signature`, `nonce_mismatch`, `product_mismatch`, `type_mismatch`, `hwid_mismatch`, `malformed`. `type` is required: pass the endpoint the request went to (`validate`, `deactivate`, `update_check`, `download` or `trial`), because the server also signs `ok: true` answers to `update_check`, which needs no license. A missing or unknown `type` throws `VelsigilError('invalid_argument')`. With `hwid` (the hwid the request was sent with), a signed lease or `activation.hwidHash` bound to another device is `hwid_mismatch`. |
-| `verifyLease(publicKey, token, { productId, hwid, now })` | Returns `valid`, `expired`, `invalid_signature`, `product_mismatch`, `hwid_mismatch` or `malformed`. |
+| `verifyEnvelope(publicKey, envelope, { nonce, productId, type, hwid? })` | Returns `{ status: 'valid', payload }` or one of `invalid_signature`, `nonce_mismatch`, `product_mismatch`, `type_mismatch`, `hwid_mismatch`, `malformed`. `type` is required: pass the endpoint the request went to (`validate`, `deactivate`, `update_check`, `download` or `trial`), because the server also signs `ok: true` answers to `update_check`, which needs no license. A missing or unknown `type` throws `VelsigilError('invalid_argument')`. With `hwid` (the hwid the request was sent with), a signed lease or `activation.hwidHash` bound to another device is `hwid_mismatch`. Throws `VelsigilError('invalid_public_key')` for an invalid key or a published test key. |
+| `verifyLease(publicKey, token, { productId, hwid, now })` | Returns `valid`, `expired`, `invalid_signature`, `product_mismatch`, `hwid_mismatch` or `malformed`. Throws `VelsigilError('invalid_public_key')` for an invalid key or a published test key. |
 | `getHardwareId()`, `hwidFromMachineId(raw)`, `HWID_PREFIX` | Hardware id derivation. |
-| `parsePublicKey(base64)` | Imports and validates an Ed25519 public key (throws `VelsigilError`). |
+| `parsePublicKey(base64)` | Imports and validates an Ed25519 public key (throws `VelsigilError('invalid_public_key')` for an invalid key or a published test key). |
 | `VelsigilError` | Configuration error with `code`. |
 | `SERVER_CODES`, `UNSIGNED_ERROR_CODES`, `SDK_CODES`, `LEASE_REVOKING_CODES` | Code lists. |
 
@@ -398,6 +414,7 @@ Client-side licensing is a deterrent, not a vault. Recommended practices:
 - Responses: `{ data, sig, kid }`. `sig` is an Ed25519 signature over the **exact ASCII bytes of `data`**. The SDK verifies it with the configured key **before** decoding `data`. It then checks that the payload's `nonce` and `productId` (and request type) match the request.
 - base64url decoding tolerates missing padding and rejects any invalid character.
 - The shared vectors in [`test-vectors.json`](https://github.com/VelSigil/velsigil-sdks/blob/main/test-vectors.json) (envelopes, leases, HWID examples) are classified exactly as specified by `test/vectors.test.ts`.
+- The private keys of the vectors' two test key pairs are published in that file, so the `VelsigilClient` constructor refuses their public keys (`keys.publicKey`, `keys.wrongPublicKey`, compared as raw bytes in any base64 form) with `VelsigilError('invalid_public_key')` unless the API URL's host is `localhost`, `127.0.0.1` or `[::1]`. The low-level helpers `parsePublicKey`, `verifyEnvelope` and `verifyLease` have no API URL and refuse them always (see [Low-level helpers](#low-level-helpers)). The SDK's own vector tests verify the vectors through internal functions that are not exported from the package.
 
 ## Development
 

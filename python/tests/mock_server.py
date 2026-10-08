@@ -59,6 +59,12 @@ def public_key_b64(seed_b64: str = SEED) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
+def generate_public_key_b64() -> str:
+    """A freshly generated Ed25519 public key (standard base64): a "real" product key, not a vector key."""
+    raw = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return base64.b64encode(raw).decode("ascii")
+
+
 def sign_text(text: str, seed_b64: str = SEED) -> str:
     return b64url(private_key(seed_b64).sign(text.encode("ascii")))
 

@@ -20,10 +20,17 @@ internal sealed class Ed25519Verifier
     {
         _publicKey = publicKey;
         KeyId = Crypto.ToHex(Crypto.Sha256(rawKey)).Substring(0, 16);
+        IsPublishedTestKey = PublishedTestKeys.Contains(rawKey);
     }
 
     /// <summary>Key id as the server computes it: first 16 hex chars of SHA-256(raw key).</summary>
     public string KeyId { get; }
+
+    /// <summary>
+    /// True when the decoded key bytes are one of the test-vector keys whose private keys are published
+    /// (<see cref="PublishedTestKeys"/>).
+    /// </summary>
+    public bool IsPublishedTestKey { get; }
 
     /// <summary>
     /// Parses a raw 32-byte Ed25519 public key given as standard base64 (the format shown in the panel).

@@ -49,7 +49,7 @@ from velsigil_client import Code, FileStore, VelsigilClient, default_store_path
 # Keep these as constants in your code (see "Hardening").
 API_URL = "https://licenses.example.com"
 PRODUCT_ID = "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b"
-PUBLIC_KEY = "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI="  # the SDKs' public TEST key: use your product's key
+PUBLIC_KEY = "<your product's public key>"  # panel: Products > your product > Integration
 
 client = VelsigilClient(
     API_URL,
@@ -68,13 +68,20 @@ if result.has_feature("export"):
 print("Plan:", result.license.plan, "- days left:", result.days_remaining())
 ```
 
-There is a complete, runnable program in [`examples/basic.py`](https://github.com/VelSigil/velsigil-sdks/blob/main/python/examples/basic.py):
+There is a complete, runnable program in [`examples/basic.py`](https://github.com/VelSigil/velsigil-sdks/blob/main/python/examples/basic.py).
+Set the constants `API_URL`, `PRODUCT_ID` and `PUBLIC_KEY` at its top to your product's values (they ship as
+placeholders; until all three are set it prints a usage message and exits with code 2), then run:
 
 ```bash
 python examples/basic.py --license-key VSG-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
 python examples/basic.py --license-key ... --download ./downloads/app.zip
 python examples/basic.py --license-key ... --deactivate
 ```
+
+The values are constants in code, as in your application, not read from the environment. For local testing
+only, the environment variables `VELSIGIL_API_URL`, `VELSIGIL_PRODUCT_ID` and `VELSIGIL_PUBLIC_KEY` override
+them when the API URL is loopback (`localhost`, `127.0.0.1`, `[::1]`, for example a panel dev server on
+`http://localhost:3000`); for any other server they are ignored.
 
 ## How it works
 
@@ -108,7 +115,7 @@ by `download_to_file` (file errors) and by the low-level verification helpers.
 |---|---|---|
 | `api_url` | — | Server origin, e.g. `https://licenses.example.com`. `/api/client/v1` is appended unless already present; a sub-path such as `https://example.com/velsigil` also works. Must be `https://`. Plain `http://` is only accepted for `localhost`, `127.0.0.1` and `::1`. URLs containing credentials, a query string or a fragment are rejected. |
 | `product_id` | — | Product UUID (case-insensitive). |
-| `public_key` | — | Product Ed25519 public key: standard base64 of the raw 32-byte key. Missing padding is tolerated. |
+| `public_key` | — | Product Ed25519 public key: standard base64 of the raw 32-byte key. Missing padding is tolerated. The public test keys of the SDK test vectors are refused unless `api_url` is a loopback host. |
 | `timeout` | `15.0` | Seconds per request. Applies to connect and read, plus an overall deadline for the response body. |
 | `hwid` | auto | Overrides the hardware id (8–256 printable characters). The default comes from `get_hardware_id()`. |
 | `store` | `MemoryStore()` | A `LicenseStore` that persists the device secret and offline lease per product. **Use `FileStore` (or your own store) in production.** |
@@ -198,7 +205,16 @@ required: pass the endpoint the request went to (`validate`, `deactivate`, `upda
 `download` or `trial`). The server also signs `ok: true` answers to `update_check`, which needs no license, so
 the type must always be checked; `None` or an empty value raises `ValueError`. With `expected_hwid`
 (the hwid the request was sent with), a signed lease or `activation.hwidHash` bound to another
-device raises `hwid_mismatch`. The test-vector suite uses them directly.
+device raises `hwid_mismatch`.
+
+These helpers **refuse the two public keys of the SDK test vectors** (`keys.publicKey` and
+`keys.wrongPublicKey` in `test-vectors.json`, whose private keys are published there) on every host: they
+have no server URL, so unlike `VelsigilClient` they make no loopback exception. `Ed25519Verifier`,
+`key_id_for` and `velsigil_client.crypto.decode_public_key` refuse the key itself (in any accepted
+spelling), `open_envelope` and `verify_lease` a verifier that holds it, before anything else is checked.
+The refusal is a `ConfigurationError` (code `invalid_configuration`, the error of an invalid key) with the
+same message as the client constructor's. There is no opt-out argument; the SDK's own test-vector suite
+uses internal, unguarded equivalents.
 
 ### Exceptions
 
@@ -410,7 +426,11 @@ python -m unittest discover -s tests -t . -v
 
 - `tests/test_vectors.py` classifies every envelope, lease and HWID vector in the shared
   `test-vectors.json` (one folder up) with each installed backend. It also proves that the mock
-  server encodes and signs byte-for-byte like the real server.
+  server encodes and signs byte-for-byte like the real server. The private keys of the vectors are
+  published there, so `VelsigilClient` refuses their two public keys (`ConfigurationError`) unless
+  `api_url` is a loopback host (`localhost`, `127.0.0.1` or `::1`), and the public low-level helpers
+  refuse them on every host; the suite verifies the vectors through the SDK's internal, unguarded path
+  and checks both refusals.
 - `tests/test_client.py` drives the client against `tests/mock_server.py`, a threaded local HTTP
   server that signs with the vector key. It covers success, business failure, nonce, product and
   type mismatch, bad signatures, unsigned success, clock skew with a single retry, device secret

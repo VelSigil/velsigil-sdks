@@ -36,7 +36,7 @@ namespace Velsigil.Client;
 public sealed class VelsigilClient : IDisposable
 {
     /// <summary>SDK version, sent in the User-Agent header.</summary>
-    public const string SdkVersion = "1.0.1";
+    public const string SdkVersion = "1.0.2";
 
     private const string TypeValidate = "validate";
     private const string TypeDeactivate = "deactivate";
@@ -120,10 +120,15 @@ public sealed class VelsigilClient : IDisposable
     /// <param name="productId">The product id (UUID) from the panel.</param>
     /// <param name="publicKeyBase64">
     /// The product's Ed25519 public key (standard base64, from the panel's Integration tab). Embed it in
-    /// your code; it is the only key whose signatures are trusted.
+    /// your code; it is the only key whose signatures are trusted. The public keys of the SDK test vectors are
+    /// refused unless the host of <paramref name="apiUrl"/> is localhost, 127.0.0.1 or ::1: their private keys
+    /// are published, so anyone could sign answers for them.
     /// </param>
     /// <param name="options">Optional settings.</param>
-    /// <exception cref="ArgumentException">An argument is invalid.</exception>
+    /// <exception cref="ArgumentException">
+    /// An argument is invalid, or <paramref name="publicKeyBase64"/> is a published test key and the API URL is not
+    /// loopback.
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">The timeout is outside 1 s .. 10 min.</exception>
     /// <exception cref="PlatformNotSupportedException">
     /// No machine id could be read and no <see cref="VelsigilClientOptions.HardwareId"/> was supplied.
@@ -135,6 +140,12 @@ public sealed class VelsigilClient : IDisposable
         _apiBase = BuildApiBase(apiUrl, _allowInsecureHttp, out _serverRoot);
         _productId = NormalizeProductId(productId);
         _verifier = Ed25519Verifier.FromBase64(publicKeyBase64);
+        // The test-vector keys' private keys are published: anyone could sign answers for them. Allowed only against a
+        // loopback server, the same hosts plain http is allowed for (one helper, so the two rules cannot drift apart).
+        if (_verifier.IsPublishedTestKey && !IsLoopbackHost(_serverRoot))
+        {
+            throw new ArgumentException(PublishedTestKeys.RefusalMessage, nameof(publicKeyBase64));
+        }
 
         if (options.Timeout < MinTimeout || options.Timeout > MaxTimeout)
         {
@@ -954,12 +965,23 @@ public sealed class VelsigilClient : IDisposable
         return allowInsecureHttp || IsLoopbackHost(uri);
     }
 
+    // The loopback hosts: plain http is allowed for them, and so are the published test keys (constructor).
     private static bool IsLoopbackHost(Uri uri)
     {
         var host = uri.Host;
-        return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
-            || host == "127.0.0.1"
-            || host == "[::1]"
-            || host == "::1";
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) || host == "127.0.0.1") return true;
+        if (uri.HostNameType != UriHostNameType.IPv6) return false;
+
+        // ::1, compared as address bytes: Uri.Host spells it "[::1]" on .NET Core but
+        // "[0000:0000:0000:0000:0000:0000:0000:0001]" on .NET Framework (netstandard2.0 asset). Exactly ::1: not the
+        // IPv4-mapped ::ffff:127.0.0.1, which Uri.IsLoopback would accept. Uri.Host never carries a scope id.
+        var text = host.Length > 2 && host[0] == '[' && host[host.Length - 1] == ']' ? host.Substring(1, host.Length - 2) : host;
+        if (!System.Net.IPAddress.TryParse(text, out var address) || address.AddressFamily != AddressFamily.InterNetworkV6) return false;
+        var bytes = address.GetAddressBytes();
+        for (var i = 0; i < bytes.Length - 1; i++)
+        {
+            if (bytes[i] != 0) return false;
+        }
+        return bytes.Length == 16 && bytes[15] == 1;
     }
 }

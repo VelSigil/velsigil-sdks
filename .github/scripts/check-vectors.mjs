@@ -9,12 +9,20 @@
 //     the vector does not expect invalid_signature; names are unique; expect / requestType values are known;
 //   - every SDK test suite still reads this file (so none can silently drop the shared vectors).
 // Node.js only (node:crypto), no dependencies. Exit 1 with a list of problems.
+import { execFileSync } from 'node:child_process';
 import { createPrivateKey, createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+// The SDK source files that hold the guard constant refusing the published test keys (see the check at the end).
+const TEST_KEY_GUARD_FILE_LIST = [
+  'node/src/signature.ts',
+  'python/velsigil_client/client.py',
+  'csharp/src/Velsigil.Client/Internal/PublishedTestKeys.cs',
+  'cpp/src/client.cpp',
+];
 const FILE = join(ROOT, 'test-vectors.json');
 const problems = [];
 
@@ -92,6 +100,24 @@ for (const [rel, re] of consumers) {
     continue;
   }
   if (!re.test(src)) problems.push(`${rel} no longer reads test-vectors.json`);
+}
+
+// The published test keys (their private seeds are in this file) must never appear where a seller could copy them
+// into an application: READMEs, docs, examples, docstrings. They are allowed only in tests, in this file and in the
+// SDKs' guard constants that refuse them (TEST_KEY_GUARD_FILES).
+const TEST_KEY_GUARD_FILES = new Set(TEST_KEY_GUARD_FILE_LIST);
+const testKeyStrings = [v.keys.publicKey, v.keys.wrongPublicKey];
+const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: ROOT }).toString('utf8').split('\0').filter(Boolean);
+for (const rel of tracked) {
+  if (rel === 'test-vectors.json' || TEST_KEY_GUARD_FILES.has(rel) || /(^|\/)(test|tests)\//.test(rel)) continue;
+  let src;
+  try { src = readFileSync(join(ROOT, rel), 'utf8'); } catch { continue; }
+  for (const k of testKeyStrings) {
+    if (src.includes(k)) problems.push(`${rel} contains the published test key ${k.slice(0, 8)}...: use a placeholder such as "<your product public key>" (only tests and the SDK guard constants may contain it)`);
+  }
+}
+for (const rel of TEST_KEY_GUARD_FILES) {
+  if (!tracked.includes(rel)) problems.push(`${rel} (listed in TEST_KEY_GUARD_FILES) is not in the repository: update the list`);
 }
 
 if (problems.length) {

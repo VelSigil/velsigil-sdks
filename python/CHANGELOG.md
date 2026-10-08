@@ -1,5 +1,33 @@
 # Changelog - Velsigil Python SDK (`velsigil-client`)
 
+## 1.0.2 (2026-10-08)
+
+### Security
+
+- `VelsigilClient` now refuses the two public keys of the shared SDK test vectors (`keys.publicKey` and
+  `keys.wrongPublicKey` in `test-vectors.json`, whose private keys are published there, so anyone could forge
+  license answers for an app that trusts them) unless `api_url` is a loopback host (`localhost`, `127.0.0.1`,
+  `::1`: the hosts that may use plain HTTP). The decoded 32 key bytes are compared, so another spelling of the same
+  key (no padding, surrounding whitespace, non-zero unused bits in the last base64 character) is refused too. The constructor raises `ConfigurationError` (code
+  `invalid_configuration`), as for an invalid public key. The README, the package docstring and
+  `examples/basic.py` now show the placeholder `"<your product's public key>"` instead of the test key; the example
+  exits with a usage message until a key is set.
+- The public low-level helpers refuse the same two keys too, on every host: they have no server URL, so they
+  make no loopback exception. `Ed25519Verifier`, `key_id_for` and `velsigil_client.crypto.decode_public_key`
+  refuse the key itself (compared as decoded bytes, so in any accepted spelling); `open_envelope` and
+  `verify_lease` refuse a verifier that holds it, before checking anything else. Each raises
+  `ConfigurationError` (code `invalid_configuration`), the error it raises for an invalid key, with the
+  constructor's message. There is no opt-out argument: `VelsigilClient` (for a loopback `api_url`) and the SDK's
+  own test-vector suite use internal, unguarded equivalents. Code that verified with a test key through these
+  helpers must use its product's own public key.
+- `examples/basic.py`: `API_URL`, `PRODUCT_ID` and `PUBLIC_KEY` are now constants in code with clear placeholders
+  (`<your Velsigil server URL>`, `<your product id>`, `<your product's public key>`) instead of values read from
+  the environment; while any placeholder is still in place the example prints a usage message and exits with
+  code 2. For local testing only, `VELSIGIL_API_URL`, `VELSIGIL_PRODUCT_ID` and `VELSIGIL_PUBLIC_KEY` still
+  override them, but only when the API URL is loopback (`localhost`, `127.0.0.1`, `[::1]`); for any other server
+  they are ignored, with a note on stderr. `VELSIGIL_ALLOW_INSECURE_HTTP` was removed: loopback hosts may use
+  plain HTTP anyway.
+
 ## 1.0.1 (2026-10-08)
 
 No code changes from 1.0.0. The release workflow of 1.0.0 published only the C++ source release on GitHub: its

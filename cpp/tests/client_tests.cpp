@@ -1,8 +1,10 @@
-// Client behaviour tests. An in-process "server" (an injected ITransport) signs responses with the
-// test-vector private seed, and an injected clock makes time deterministic. Covers: ok, business
-// failures, tampered/mismatched responses, clock_skew + retry, device-secret persistence, unsigned
-// HTTP errors (400/429/500/...), transport failures, offline fallback, the HTTPS policy for download
-// grants, configuration hardening, stores and concurrent use. Exit code 0 = all checks passed.
+// Client behaviour tests. An in-process "server" (an injected ITransport) signs responses with a key
+// pair generated for this run (the published test-vector key is refused for the non-loopback kApiUrl),
+// and an injected clock makes time deterministic. Covers: ok, business failures, tampered/mismatched
+// responses, clock_skew + retry, device-secret persistence, unsigned HTTP errors (400/429/500/...),
+// transport failures, offline fallback, the HTTPS policy for download grants, configuration hardening
+// (including the refusal of the published test-vector keys outside loopback hosts), stores and
+// concurrent use. Exit code 0 = all checks passed.
 #include <velsigil/client.hpp>
 
 #include <nlohmann/json.hpp>
@@ -95,10 +97,28 @@ std::string b64url(std::string_view text) {
   return velsigil::detail::base64url_encode(reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
 }
 
+// Standard base64 with padding (the encoding of a product public key).
+std::string b64_standard(const std::uint8_t* data, std::size_t length) {
+  std::string out = velsigil::detail::base64url_encode(data, length);
+  for (char& c : out) {
+    if (c == '-') c = '+';
+    if (c == '_') c = '/';
+  }
+  while (out.size() % 4 != 0) out.push_back('=');
+  return out;
+}
+
 struct Keys {
+  // The signing "server": a key pair generated for this run (see make_keys). Its public key is the one the
+  // tests configure, so a Client with the non-loopback kApiUrl accepts it.
   std::string public_key;
   std::vector<std::uint8_t> seed;
-  std::vector<std::uint8_t> wrong_seed;
+  std::vector<std::uint8_t> wrong_seed;  // another fresh pair: signatures that must not verify
+  // The published test-vector keys (test-vectors.json keys.publicKey / keys.wrongPublicKey) and the seed of
+  // keys.publicKey: the Client refuses them unless the API URL's host is loopback.
+  std::string vector_public_key;
+  std::string vector_wrong_public_key;
+  std::vector<std::uint8_t> vector_seed;
 };
 
 // ---- signing "server" ---------------------------------------------------------------------------
@@ -1235,8 +1255,10 @@ void test_configuration(const Keys& keys) {
     check(client.validate_offline().code == "invalid_configuration", "invalid public key: offline too");
   }
   {
-    velsigil::Client client(kApiUrl, kProduct, "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI", options());
-    check(client.is_configured(), "public key without padding is accepted");
+    std::string unpadded = keys.public_key;
+    while (!unpadded.empty() && unpadded.back() == '=') unpadded.pop_back();
+    velsigil::Client client(kApiUrl, kProduct, unpadded, options());
+    check(unpadded.size() == 43 && client.is_configured(), "public key without padding is accepted");
   }
   {
     velsigil::Client client(kApiUrl, "not-a-uuid", keys.public_key, options());
@@ -1277,6 +1299,198 @@ void test_configuration(const Keys& keys) {
     } else {
       check(client.is_configured() && client.hardware_id() == hwid, "detected hardware id is used");
     }
+  }
+}
+
+// The public keys of the shared test vectors (their private seeds are published in test-vectors.json) are
+// refused like an invalid public key unless the API URL's host is loopback. The decoded bytes are compared,
+// so another encoding of a test key is refused too.
+void test_published_test_keys(const Keys& keys) {
+  auto server = std::make_shared<FakeServer>();
+  server->handler = [](const std::string&, const json&) { return unreachable("offline"); };
+  auto store = std::make_shared<velsigil::MemoryStore>();
+  auto clock = std::make_shared<std::int64_t>(kStartTime);
+  auto options = [&] { return make_options(server, store, clock); };
+  const std::string expected_error =
+      "This is the public test key from the Velsigil SDK test vectors, whose private key is published: anyone could "
+      "forge license answers for it. Use your product's public key (panel: Products > your product > Integration).";
+
+  auto unpadded = [](std::string key) {
+    while (!key.empty() && key.back() == '=') key.pop_back();
+    return key;
+  };
+  const std::vector<std::pair<std::string, std::string>> test_keys = {
+      {"keys.publicKey", keys.vector_public_key},
+      {"keys.publicKey without padding", unpadded(keys.vector_public_key)},
+      {"keys.publicKey with surrounding whitespace", " \t" + keys.vector_public_key + "\n"},
+      {"keys.wrongPublicKey", keys.vector_wrong_public_key},
+      {"keys.wrongPublicKey without padding", unpadded(keys.vector_wrong_public_key)},
+  };
+
+  // (a) Refused with a non-loopback HTTPS URL: same path as an invalid public key, nothing is ever sent.
+  const std::vector<std::string> remote_urls = {
+      kApiUrl,
+      "https://licenses.example.com/api/client/v1",
+      "HTTPS://Licenses.Example.com:8443",
+      "https://localhost.example.com",
+      "https://127.0.0.1.example.com",
+      "https://192.168.1.10",
+      "https://[::2]:8443",
+      // Look-alikes of the loopback hosts that name other hosts (or are spelled differently): never exempt.
+      "https://localhost.",
+      "https://127.1",
+      "https://[0:0:0:0:0:0:0:1]",
+      "https://127.0.0.1.nip.io",
+  };
+  for (const auto& [label, key] : test_keys) {
+    for (const std::string& url : remote_urls) {
+      const std::string name = label + " with API URL '" + url + "'";
+      const std::size_t before = server->count();
+      velsigil::Client client(url, kProduct, key, options());
+      check(!client.is_configured(), name + ": refused");
+      check_equal(client.configuration_error(), expected_error, name + ": configuration error");
+      const auto result = client.validate(kLicenseKey);
+      check(!result.ok && result.code == "invalid_configuration", name + ": validate returns invalid_configuration");
+      check_equal(result.message, expected_error, name + ": validate message");
+      check(client.validate_offline().code == "invalid_configuration", name + ": validate_offline returns invalid_configuration");
+      check(client.check_update("1.0.0").code == "invalid_configuration", name + ": check_update returns invalid_configuration");
+      check(server->count() == before, name + ": nothing is sent");
+    }
+  }
+  {
+    // allow_insecure_http admits plain http to any host, never a test key to a non-loopback one.
+    auto insecure = options();
+    insecure.allow_insecure_http = true;
+    velsigil::Client client("http://licenses.example.com", kProduct, keys.vector_public_key, insecure);
+    check(!client.is_configured() && client.configuration_error() == expected_error,
+          "allow_insecure_http does not admit a test key for a non-loopback host");
+  }
+  {
+    // The public key decoder accepts only the standard alphabet, so the URL-safe spelling of a test key is no way
+    // around the guard either (it is refused as an invalid key).
+    std::string url_safe = keys.vector_public_key;
+    for (char& c : url_safe) {
+      if (c == '+') c = '-';
+      if (c == '/') c = '_';
+    }
+    velsigil::Client client(kApiUrl, kProduct, url_safe, options());
+    check(url_safe != keys.vector_public_key && !client.is_configured() &&
+              client.validate(kLicenseKey).code == "invalid_configuration",
+          "the URL-safe spelling of keys.publicKey is refused");
+  }
+
+  // (b) Accepted with a loopback URL (a local test server), over http or https.
+  const std::vector<std::string> loopback_urls = {
+      "http://localhost:3000",
+      "http://LocalHost:3000/api/client/v1",
+      "http://127.0.0.1:8080/",
+      "http://[::1]:3000",
+      "https://localhost:8443",
+      "https://127.0.0.1",
+  };
+  for (const auto& [label, key] : test_keys) {
+    for (const std::string& url : loopback_urls) {
+      const std::string name = label + " with API URL '" + url + "'";
+      const std::size_t before = server->count();
+      velsigil::Client client(url, kProduct, key, options());
+      check(client.is_configured(), name + ": accepted (" + client.configuration_error() + ")");
+      check(client.validate(kLicenseKey).code == "network_error" && server->count() == before + 1,
+            name + ": reaches the transport");
+    }
+  }
+  {
+    // End to end: answers signed with the published seed verify for a local test server.
+    Keys vector_keys = keys;
+    vector_keys.public_key = keys.vector_public_key;
+    vector_keys.seed = keys.vector_seed;
+    Harness h(vector_keys, "http://localhost:3000");
+    h.server->handler = [&h](const std::string& endpoint, const json& request) {
+      json p = payload(request, endpoint, true, "ok", kStartTime);
+      p["license"] = license_json(kStartTime + 30 * 86400);
+      return http(200, h.signer.envelope(p));
+    };
+    check(h.client.validate(kLicenseKey).ok, "the test-vector key verifies the answers of a local test server");
+  }
+
+  // (c) A real (random) product key is still accepted with a non-loopback URL.
+  {
+    std::array<unsigned char, crypto_sign_PUBLICKEYBYTES> random_public{};
+    std::array<unsigned char, crypto_sign_SECRETKEYBYTES> random_secret{};
+    crypto_sign_keypair(random_public.data(), random_secret.data());
+    sodium_memzero(random_secret.data(), random_secret.size());
+    const std::string random_key = b64_standard(random_public.data(), random_public.size());
+    for (const std::string& url : remote_urls) {
+      velsigil::Client client(url, kProduct, random_key, options());
+      check(client.is_configured(), "a random product key with API URL '" + url + "' is accepted (" +
+                                        client.configuration_error() + ")");
+    }
+    velsigil::Client client(kApiUrl, kProduct, keys.public_key, options());
+    check(client.is_configured(), "this run's signing key is accepted with a non-loopback URL");
+  }
+
+  // One loopback rule: a host may use the test keys exactly when it may use plain http:// (the same helper).
+  const std::vector<std::string> hosts = {
+      "localhost", "LOCALHOST:3000", "127.0.0.1", "127.0.0.1:8080", "[::1]", "[::1]:3000", "localhost.",
+      "127.0.0.2", "0.0.0.0", "[::2]", "localhost.example.com", "licenses.example.com", "localhost@evil.example", "[::1",
+  };
+  for (const std::string& host : hosts) {
+    const bool plain_http_allowed = !velsigil::detail::url_policy_error("http://" + host, false).has_value();
+    check(velsigil::detail::is_loopback_url("http://" + host) == plain_http_allowed, "loopback rule for http://" + host);
+    check(velsigil::detail::is_loopback_url("https://" + host) == plain_http_allowed, "loopback rule for https://" + host);
+  }
+  check(velsigil::detail::is_loopback_url("http://localhost:3000") && !velsigil::detail::is_loopback_url("https://licenses.example.com"),
+        "is_loopback_url sanity");
+}
+
+// The public low-level helpers (verify_envelope_typed, verify_lease) verify answers and leases signed with a
+// product's own key, and refuse the published test-vector key always, like an invalid key, even for answers and
+// leases its published seed really signed: they have no API URL that could name a local test server. The
+// internal entry points (detail::*_unguarded, for the SDK's vector tests) still verify them.
+void test_low_level_helpers(const Keys& keys) {
+  constexpr char kNonce[] = "low-level-helpers-nonce-0123456789";
+  json request = json::object();
+  request["nonce"] = kNonce;
+  request["productId"] = kProduct;
+  json answer = payload(request, "validate", true, "ok", kStartTime);
+  answer["license"] = license_json(kStartTime + 30 * 86400);
+  const json claims = lease_claims(kStartTime, kStartTime + 86400);
+  const std::int64_t now = kStartTime + 60;
+
+  {
+    // This run's key pair stands for a product's own key: verified as usual.
+    const Signer signer(keys.seed);
+    const std::string envelope = signer.envelope(answer);
+    const std::string lease = signer.lease(claims);
+    const auto verification = velsigil::verify_envelope_typed(envelope, keys.public_key, kNonce, kProduct, "validate", kHwid);
+    check(verification.status == velsigil::EnvelopeStatus::valid && !verification.payload_json.empty(),
+          "verify_envelope_typed verifies an answer signed with the product's own key");
+    const auto lease_verification = velsigil::verify_lease(lease, keys.public_key, kProduct, kHwid, now);
+    check(lease_verification.status == velsigil::LeaseStatus::valid && lease_verification.claims.has_value(),
+          "verify_lease verifies a lease signed with the product's own key");
+  }
+
+  const Signer vector_signer(keys.vector_seed);
+  const std::string envelope = vector_signer.envelope(answer);
+  const std::string lease = vector_signer.lease(claims);
+  std::string unpadded = keys.vector_public_key;
+  while (!unpadded.empty() && unpadded.back() == '=') unpadded.pop_back();
+  const std::vector<std::pair<std::string, std::string>> spellings = {
+      {"keys.publicKey", keys.vector_public_key},
+      {"keys.publicKey without padding", unpadded},
+      {"keys.publicKey with surrounding whitespace", " " + keys.vector_public_key + "\r\n"},
+  };
+  for (const auto& [label, key] : spellings) {
+    const auto control = velsigil::detail::verify_envelope_typed_unguarded(envelope, key, kNonce, kProduct, "validate", kHwid);
+    check(control.status == velsigil::EnvelopeStatus::valid, label + ": the answer verifies through the internal entry point");
+    const auto refused = velsigil::verify_envelope_typed(envelope, key, kNonce, kProduct, "validate", kHwid);
+    check(refused.status == velsigil::EnvelopeStatus::invalid_signature && refused.payload_json.empty(),
+          label + ": verify_envelope_typed refuses it like an invalid key");
+
+    const auto lease_control = velsigil::detail::verify_lease_unguarded(lease, key, kProduct, kHwid, now);
+    check(lease_control.status == velsigil::LeaseStatus::valid, label + ": the lease verifies through the internal entry point");
+    const auto refused_lease = velsigil::verify_lease(lease, key, kProduct, kHwid, now);
+    check(refused_lease.status == velsigil::LeaseStatus::invalid_signature && !refused_lease.claims.has_value(),
+          label + ": verify_lease refuses it like an invalid key");
   }
 }
 
@@ -1677,21 +1891,30 @@ void test_machine_id_placeholder() {
   check(!usable_machine_id(" \n"), "an empty machine-id file is skipped");
 }
 
-Keys load_keys(const std::string& path) {
-  std::ifstream in(path, std::ios::in | std::ios::binary);
-  if (!in) throw std::runtime_error("cannot open test vectors: " + path);
+// The signing "server" uses key pairs generated for this run: the published test-vector key is refused for
+// the non-loopback kApiUrl (test_published_test_keys). The vector keys are loaded for that test only.
+Keys make_keys(const std::string& vectors_path) {
+  std::ifstream in(vectors_path, std::ios::in | std::ios::binary);
+  if (!in) throw std::runtime_error("cannot open test vectors: " + vectors_path);
   std::ostringstream buffer;
   buffer << in.rdbuf();
   const json vectors = json::parse(buffer.str());
   Keys keys;
-  keys.public_key = vectors.at("keys").at("publicKey").get<std::string>();
-  const auto seed = velsigil::detail::base64_decode(vectors.at("keys").at("privateSeedBase64").get<std::string>());
-  const auto wrong = velsigil::detail::base64_decode(vectors.at("keys").at("wrongPrivateSeedBase64").get<std::string>());
-  if (!seed || seed->size() != crypto_sign_SEEDBYTES || !wrong || wrong->size() != crypto_sign_SEEDBYTES) {
-    throw std::runtime_error("invalid seeds in test vectors");
-  }
-  keys.seed = *seed;
-  keys.wrong_seed = *wrong;
+  keys.vector_public_key = vectors.at("keys").at("publicKey").get<std::string>();
+  keys.vector_wrong_public_key = vectors.at("keys").at("wrongPublicKey").get<std::string>();
+  const auto vector_seed = velsigil::detail::base64_decode(vectors.at("keys").at("privateSeedBase64").get<std::string>());
+  if (!vector_seed || vector_seed->size() != crypto_sign_SEEDBYTES) throw std::runtime_error("invalid seed in test vectors");
+  keys.vector_seed = *vector_seed;
+
+  keys.seed.resize(crypto_sign_SEEDBYTES);
+  keys.wrong_seed.resize(crypto_sign_SEEDBYTES);
+  randombytes_buf(keys.seed.data(), keys.seed.size());
+  randombytes_buf(keys.wrong_seed.data(), keys.wrong_seed.size());
+  std::array<unsigned char, crypto_sign_PUBLICKEYBYTES> public_key{};
+  std::array<unsigned char, crypto_sign_SECRETKEYBYTES> secret_key{};
+  crypto_sign_seed_keypair(public_key.data(), secret_key.data(), keys.seed.data());
+  sodium_memzero(secret_key.data(), secret_key.size());
+  keys.public_key = b64_standard(public_key.data(), public_key.size());
   return keys;
 }
 
@@ -1703,7 +1926,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
-    const Keys keys = load_keys(argc > 1 ? std::string(argv[1]) : std::string(VX_TEST_VECTORS_PATH));
+    const Keys keys = make_keys(argc > 1 ? std::string(argv[1]) : std::string(VX_TEST_VECTORS_PATH));
     test_validate_ok_and_device_secret(keys);
     test_business_failures(keys);
     test_tampered_responses(keys);
@@ -1717,6 +1940,8 @@ int main(int argc, char** argv) {
     test_update_and_download(keys);
     test_download_url_policy(keys);
     test_configuration(keys);
+    test_published_test_keys(keys);
+    test_low_level_helpers(keys);
     test_store_failures_are_contained(keys);
     test_store_read_failures_fail_closed(keys);
     test_file_store(keys);

@@ -12,6 +12,7 @@ a :class:`~velsigil_client.models.VelsigilResult`.
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import functools
 import hashlib
@@ -33,11 +34,13 @@ import urllib.request
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TypeVar
 
 from .crypto import (
-    Ed25519Verifier,
+    _PUBLISHED_TEST_KEY_MESSAGE,
+    _is_published_test_key,
+    _new_verifier,
+    _open_envelope,
+    _verify_lease,
     as_int,
     new_nonce,
-    open_envelope,
-    verify_lease,
 )
 from .errors import (
     UNSIGNED_ERROR_CODES,
@@ -58,7 +61,7 @@ from .models import (
 )
 from .store import LicenseStore, MemoryStore, StoredState
 
-SDK_VERSION = "1.0.1"
+SDK_VERSION = "1.0.2"
 
 API_PATH = "/api/client/v1"
 DEFAULT_TIMEOUT = 15.0
@@ -70,7 +73,21 @@ MAX_LICENSE_KEY_LENGTH = 64
 MAX_EMAIL_LENGTH = 254
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-_log = logging.getLogger("velsigil_client")
+#: The two public keys of the shared SDK test vectors (``test-vectors.json``:
+#: ``keys.publicKey`` and ``keys.wrongPublicKey``), as raw 32-byte keys. Their
+#: private seeds are published next to them, so anyone can sign "valid" answers
+#: for them. The constructor refuses them unless ``api_url`` is loopback; the
+#: public helpers in :mod:`velsigil_client.crypto` refuse them always (through
+#: ``crypto._is_published_test_key``). Internal, not part of the public API.
+_PUBLISHED_TEST_PUBLIC_KEYS = frozenset(
+    base64.b64decode(key)
+    for key in (
+        "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=",
+        "b/OKSQM/kKwu80PNfHkda3EM9dk1/ZmNKkQz/1azw/Q=",
+    )
+)
+
+_log =logging.getLogger("velsigil_client")
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 _DEVICE_SECRET_RE = re.compile(r"^[\x21-\x7e]{16,256}\Z")
@@ -247,6 +264,8 @@ class VelsigilClient:
     :param product_id: The product's UUID.
     :param public_key: The product's Ed25519 public key (standard base64).
         Embed it in your application; it is the only key that is trusted.
+        The public test keys of the SDK test vectors are refused unless
+        ``api_url`` is a loopback host (localhost, 127.0.0.1, ::1).
     :param timeout: Per-request timeout in seconds (default 15).
     :param hwid: Override the hardware id (8..256 characters). By default it
         is derived from the OS machine id (:meth:`get_hardware_id`).
@@ -289,7 +308,14 @@ class VelsigilClient:
             raise ConfigurationError("product_id must be a UUID string")
         self._product_id = product_id.strip().lower()
 
-        self._verifier = Ed25519Verifier(public_key, backend=crypto_backend)
+        # The internal verifier: the public Ed25519Verifier refuses the published test keys
+        # unconditionally, the client allows them for a loopback api_url (the same hosts that may use
+        # plain HTTP). The decoded key bytes are compared, so no other encoding of a test key gets through.
+        self._verifier = _new_verifier(public_key, backend=crypto_backend)
+        if _is_published_test_key(self._verifier.public_key_bytes) and not _is_local_host(
+            urllib.parse.urlsplit(self._base_url).hostname
+        ):
+            raise ConfigurationError(_PUBLISHED_TEST_KEY_MESSAGE)
 
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 600:
             raise ConfigurationError("timeout must be a number of seconds in (0, 600]")
@@ -523,7 +549,7 @@ class VelsigilClient:
             return _failure(Code.NO_LEASE, "No offline lease is stored for this product.", offline=True)
         now = self._now()
         try:
-            claims = verify_lease(self._verifier, token, self._product_id, self._hwid, now)
+            claims = _verify_lease(self._verifier, token, self._product_id, self._hwid, now)
             license_info = LicenseInfo(
                 id=_claim_str(claims, "licenseId"),
                 plan=_claim_str(claims, "plan"),
@@ -719,7 +745,7 @@ class VelsigilClient:
         try:
             # Device-bound requests carry "hwid": the signed lease/activation must then belong to it.
             hwid = body.get("hwid")
-            payload = open_envelope(
+            payload = _open_envelope(
                 self._verifier,
                 envelope,
                 nonce,
@@ -880,7 +906,7 @@ class VelsigilClient:
             lease = None
             if result.lease is not None:
                 try:
-                    verify_lease(self._verifier, result.lease.token, self._product_id, self._hwid, self._now())
+                    _verify_lease(self._verifier, result.lease.token, self._product_id, self._hwid, self._now())
                     lease = result.lease.token
                 except LeaseError as exc:
                     _log.warning("not storing offline lease from server: %s", exc.reason)

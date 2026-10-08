@@ -7,7 +7,13 @@ namespace Velsigil.Client.Tests.Infrastructure;
 
 internal static class TestClients
 {
-    public const string ApiUrl = "https://licenses.example.test";
+    // Loopback: the client refuses the published test-vector keys for any other host. Requests never leave the
+    // process (MockServer), so the host only matters for that rule.
+    public const string ApiUrl = "https://localhost";
+
+    // A non-loopback URL, for tests that build a client with a freshly generated key (TestSigner.Random()).
+    public const string RemoteApiUrl = "https://licenses.example.com";
+
     public const string LicenseKey = "VSG-ABCDE-FGHJK-LMNPQ-RSTVW-XYZ23";
 
     // All temporary directories of one test run live under this folder, removed when the process exits.

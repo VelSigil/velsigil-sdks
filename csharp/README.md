@@ -84,7 +84,7 @@ public static class Licensing
     // Compiled-in constants. Never load the public key from a file, the registry or the network.
     private const string ApiUrl = "https://licenses.example.com";
     private const string ProductId = "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b";
-    private const string PublicKey = "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI="; // the SDKs' public TEST key: use your product's key
+    private const string PublicKey = "<your product's public key>"; // base64, from the panel's Integration tab
 
     // One long-lived client per product.
     public static readonly VelsigilClient Client = new VelsigilClient(ApiUrl, ProductId, PublicKey,
@@ -107,14 +107,19 @@ Console.WriteLine(result.IsLifetime ? "Lifetime license" : $"{result.DaysRemaini
 if (result.Offline) Console.WriteLine("Validated offline with the stored lease.");
 ```
 
-A runnable walkthrough lives in [`examples/ConsoleExample`](https://github.com/VelSigil/velsigil-sdks/blob/main/csharp/examples/ConsoleExample/Program.cs):
+A runnable walkthrough lives in [`examples/ConsoleExample`](https://github.com/VelSigil/velsigil-sdks/blob/main/csharp/examples/ConsoleExample/Program.cs).
+Like a real application, it takes the API URL, product id and public key from compiled-in constants (`ApiUrl`,
+`ProductId`, `PublicKey` at the top of `Program.cs`): replace their placeholders with your product's values, then run
 
 ```powershell
-$env:VELSIGIL_URL = "http://localhost:3000"
-$env:VELSIGIL_PRODUCT_ID = "<product uuid>"
-$env:VELSIGIL_PUBLIC_KEY = "<base64 public key>"
 dotnet run --project examples/ConsoleExample -- validate      # or: offline | update | download <file> | deactivate
 ```
+
+While a placeholder is still in place it prints a usage message and exits with code 2. The license key is read from
+`VELSIGIL_LICENSE_KEY` or prompted for, and never printed. For local testing only, `VELSIGIL_URL`,
+`VELSIGIL_PRODUCT_ID` and `VELSIGIL_PUBLIC_KEY` override the three constants, and only when the API URL is loopback
+(`localhost`, `127.0.0.1` or `[::1]`, e.g. `$env:VELSIGIL_URL = "http://localhost:3000"`); with any other URL the
+example refuses to start (exit code 2).
 
 ---
 
@@ -132,7 +137,7 @@ public VelsigilClient(string apiUrl, string productId, string publicKeyBase64, V
 |---|---|
 | `apiUrl` | Server URL, e.g. `https://licenses.example.com` (a URL ending in `/api/client/v1` and sub-path deployments such as `https://example.com/licensing` work too). Must be **https**; plain http is accepted only for `localhost`, `127.0.0.1` and `::1` unless `AllowInsecureHttp` is set. No credentials, query or fragment. |
 | `productId` | Product UUID (normalised to lowercase). |
-| `publicKeyBase64` | The product's raw 32-byte Ed25519 public key, standard base64. The **only** key whose signatures are trusted; the envelope `kid` is never used to pick a key. |
+| `publicKeyBase64` | The product's raw 32-byte Ed25519 public key, standard base64. The **only** key whose signatures are trusted; the envelope `kid` is never used to pick a key. The public keys of the SDK test vectors are refused (`ArgumentException`) unless the API URL's host is `localhost`, `127.0.0.1` or `::1`: their private keys are published. |
 | `options` | Optional `VelsigilClientOptions` (copied at construction). |
 
 The constructor throws `ArgumentException` / `ArgumentOutOfRangeException` for invalid configuration and
@@ -213,8 +218,12 @@ including timeouts, DNS/TLS/connection errors, HTTP errors, bad signatures and l
 
 `LeaseVerifier.Verify(string? token, string publicKeyBase64, string productId, string hwid, DateTimeOffset now)`
 returns a `LeaseVerification { Status, IsValid, Claims }` with `LeaseStatus` = `Valid`, `Expired`,
-`InvalidSignature`, `ProductMismatch`, `HwidMismatch` or `Malformed`. `ValidateOffline()` uses it with the
-pinned key; it is public for applications that keep leases themselves.
+`InvalidSignature`, `ProductMismatch`, `HwidMismatch` or `Malformed`. `ValidateOffline()` uses the same
+verification with the pinned key; it is public for applications that keep leases themselves. It throws
+`ArgumentException` (parameter `publicKeyBase64`) for an invalid key, and also for the two public keys of the SDK
+test vectors (`keys.publicKey`, `keys.wrongPublicKey` in `test-vectors.json`), in any encoding: their private keys
+are published, so anyone could sign a lease for them. This helper has no server URL, so unlike the
+`VelsigilClient` constructor it refuses them always, with the same message; there is no opt-out.
 
 There is no public envelope verifier: response envelopes are only verified inside `VelsigilClient`, which
 always requires the signed `type` to match the endpoint (the server also signs `ok` answers to
@@ -578,7 +587,10 @@ in-process mock server that signs responses with `keys.privateSeedBase64` plus a
 on 127.0.0.1: success, business failures, nonce / product / type mismatches, bad and missing signatures,
 `clock_skew` with a successful retry, device-secret persistence and re-sending, 400/403/404/413/415/429/500,
 gateway errors, timeouts, connection refused, cancellation, offline fallback with a fake clock, verified
-downloads and file-store permissions.
+downloads and file-store permissions. Because the vector private keys are published, the SDK refuses both vector
+public keys (`keys.publicKey`, `keys.wrongPublicKey`): the client unless the API URL is localhost, 127.0.0.1 or ::1,
+the public `LeaseVerifier.Verify` always. The lease vectors are therefore checked through the SDK's internal
+verification path (not part of the public API).
 
 Before a release this SDK is also run against a **real** Velsigil server: activation, device-secret
 persistence, offline lease, updates, verified download, clock skew, replay, suspension, invalid key and

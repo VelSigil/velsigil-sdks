@@ -7,7 +7,7 @@ Quick start::
     client = VelsigilClient(
         "https://licenses.example.com",
         "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b",
-        "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=",
+        "<your product's public key>",  # panel: Products > your product > Integration
         store=FileStore(default_store_path("MyApp")),
     )
     result = client.validate_with_offline_fallback(license_key, version="1.4.0")

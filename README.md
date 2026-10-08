@@ -22,8 +22,9 @@ from a file or setting the user can change.
 
 ## Quick start
 
-The values below are placeholders. The public key in them is the SDKs' published **test** key (its private half is
-in [`test-vectors.json`](test-vectors.json)), so replace it with your own product's public key.
+The values in angle brackets are placeholders: replace them with the API URL, product id and public key from your
+panel. The SDKs refuse the published **test** keys of [`test-vectors.json`](test-vectors.json) (their private halves
+are public) unless the API URL is `localhost`, so a copied test key fails at startup instead of trusting forged answers.
 
 ### Node.js
 
@@ -36,9 +37,9 @@ import { hostname } from 'node:os';
 import { VelsigilClient, FileStore, defaultStoreDirectory } from 'velsigil-client';
 
 const client = new VelsigilClient(
-  'https://licenses.example.com',                     // API URL
-  '0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b',             // product id
-  'I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=',     // product public key
+  'https://licenses.example.com',                   // API URL
+  '<your product id>',                              // product id
+  '<your product public key>',                      // from Products > Integration
   { store: new FileStore(defaultStoreDirectory('MyApp')) }, // persists device secret + offline lease
 );
 
@@ -58,8 +59,8 @@ from velsigil_client import FileStore, VelsigilClient, default_store_path
 
 client = VelsigilClient(
     "https://licenses.example.com",                  # API URL
-    "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b",          # product id
-    "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=",  # product public key
+    "<your product id>",                             # product id
+    "<your product public key>",                     # from Products > Integration
     store=FileStore(default_store_path("MyApp")),    # persists device secret + offline lease
 )
 
@@ -83,8 +84,8 @@ using Velsigil.Client.Storage;
 // One long-lived, thread-safe client per product.
 var client = new VelsigilClient(
     "https://licenses.example.com",                  // API URL
-    "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b",          // product id
-    "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=",  // product public key
+    "<your product id>",                             // product id
+    "<your product public key>",                     // from Products > Integration
     new VelsigilClientOptions { Store = FileStore.CreateDefault("MyApp") });
 
 var result = await client.ValidateWithOfflineFallbackAsync(
@@ -101,7 +102,7 @@ check it (see [Verifying packages](#verifying-packages)) and pin its SHA-256 fro
 ```cmake
 include(FetchContent)
 FetchContent_Declare(velsigil
-  URL      https://github.com/VelSigil/velsigil-sdks/releases/download/v1.0.0/velsigil-cpp-1.0.0.tar.gz
+  URL      https://github.com/VelSigil/velsigil-sdks/releases/download/v<version>/velsigil-cpp-<version>.tar.gz
   URL_HASH SHA256=<sha256 from SHA256SUMS>)
 FetchContent_MakeAvailable(velsigil)
 target_link_libraries(my_app PRIVATE velsigil::velsigil)
@@ -116,8 +117,8 @@ packages). `cmake --install` followed by `find_package(velsigil 1.0 CONFIG REQUI
 velsigil::ClientOptions options;
 options.store = std::make_shared<velsigil::FileStore>(velsigil::FileStore::default_path("MyApp"));
 velsigil::Client client("https://licenses.example.com",                  // API URL
-                        "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b",          // product id
-                        "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=",  // product public key
+                        "<your product id>",                             // product id
+                        "<your product public key>",                     // from Products > Integration
                         options);
 
 velsigil::ValidateOptions validate_options;

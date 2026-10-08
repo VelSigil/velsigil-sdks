@@ -14,8 +14,8 @@ import {
   sameId,
   type JsonObject,
 } from './guards.js';
-import { verifyLease } from './lease.js';
-import { resolvePublicKey, verifySignature } from './signature.js';
+import { verifyLeaseAllowingTestKeys } from './lease.js';
+import { refusePublishedTestKey, resolvePublicKey, verifySignature } from './signature.js';
 import { isTrialRef } from './trial-ref.js';
 import type {
   LicenseStatus,
@@ -89,12 +89,36 @@ export interface EnvelopeExpectations {
  *    license-sharing proxy) would otherwise pass.
  *
  * Throws `VelsigilError('invalid_argument')` when `expected.type` is not a request type (a
- * programming error: the type check cannot be skipped), and `VelsigilError('invalid_public_key')`.
+ * programming error: the type check cannot be skipped), and `VelsigilError('invalid_public_key')` for an
+ * invalid key or one of the public test keys of the SDK test vectors, whose private keys are published (this
+ * helper has no API URL, so unlike the client constructor it refuses them for local servers too).
  */
 export function verifyEnvelope(
   publicKey: string | KeyObject,
   envelope: unknown,
   expected: EnvelopeExpectations,
+): EnvelopeVerification {
+  return verifyEnvelopeWith(publicKey, envelope, expected, true);
+}
+
+/**
+ * Internal (not exported from the package): {@link verifyEnvelope} without the published-test-key refusal.
+ * For `VelsigilClient`, whose constructor already refused those keys outside loopback hosts, and for the SDK's
+ * own vector tests.
+ */
+export function verifyEnvelopeAllowingTestKeys(
+  publicKey: string | KeyObject,
+  envelope: unknown,
+  expected: EnvelopeExpectations,
+): EnvelopeVerification {
+  return verifyEnvelopeWith(publicKey, envelope, expected, false);
+}
+
+function verifyEnvelopeWith(
+  publicKey: string | KeyObject,
+  envelope: unknown,
+  expected: EnvelopeExpectations,
+  refuseTestKeys: boolean,
 ): EnvelopeVerification {
   // JavaScript callers (or casts) can omit `type`: refuse instead of silently skipping the check.
   if (!isObject(expected) || !isOneOf(expected.type, REQUEST_TYPES)) {
@@ -103,7 +127,8 @@ export function verifyEnvelope(
       'expected.type must be the request type: validate, deactivate, update_check, download or trial',
     );
   }
-  const key = resolvePublicKey(publicKey);
+  const resolved = resolvePublicKey(publicKey);
+  const key = refuseTestKeys ? refusePublishedTestKey(resolved) : resolved;
   if (!isObject(envelope)) return { status: 'malformed', reason: 'Response is not a signed envelope' };
 
   const { data, sig } = envelope;
@@ -156,7 +181,8 @@ function checkDeviceBinding(
     return { status: 'hwid_mismatch', reason: 'Response activation belongs to a different device' };
   }
   if (payload.lease !== null) {
-    const lease = verifyLease(key, payload.lease.token, { productId, hwid, now: payload.serverTime });
+    // `key` was already checked by the caller (and refused there if the public helper got a test key).
+    const lease = verifyLeaseAllowingTestKeys(key, payload.lease.token, { productId, hwid, now: payload.serverTime });
     if (lease.status === 'hwid_mismatch') {
       return { status: 'hwid_mismatch', reason: 'Response lease was issued for a different device' };
     }

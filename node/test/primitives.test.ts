@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { decodeBase64Any, decodeBase64Url, generateNonce } from '../src/encoding.js';
 import { getHardwareId, parsePublicKey, VelsigilError, VelsigilResult } from '../src/index.js';
 import { parseIoregOutput, parseRegQueryOutput, readMachineId, usableLinuxMachineId } from '../src/hwid.js';
+import { parsePublicKeyAllowingTestKeys } from '../src/signature.js';
+import { randomPublicKey } from './helpers/mock-server.js';
 import { vectors } from './helpers/vectors.js';
 
 describe('base64url decoding', () => {
@@ -35,17 +37,26 @@ describe('base64url decoding', () => {
 });
 
 describe('public key parsing', () => {
-  it('imports the vector key', () => {
-    const key = parsePublicKey(vectors.keys.publicKey);
+  it('imports a product key', () => {
+    const key = parsePublicKey(randomPublicKey());
     expect(key.asymmetricKeyType).toBe('ed25519');
     expect(key.type).toBe('public');
   });
 
+  it('imports the vector key only through the internal path (the public parser refuses it)', () => {
+    const key = parsePublicKeyAllowingTestKeys(vectors.keys.publicKey);
+    expect(key.asymmetricKeyType).toBe('ed25519');
+    expect(key.type).toBe('public');
+    expect(() => parsePublicKey(vectors.keys.publicKey)).toThrow(VelsigilError);
+  });
+
   it('rejects keys of the wrong size or encoding', () => {
-    expect(() => parsePublicKey('')).toThrow(VelsigilError);
-    expect(() => parsePublicKey('AAAA')).toThrow(VelsigilError);
-    expect(() => parsePublicKey(Buffer.alloc(33).toString('base64'))).toThrow(VelsigilError);
-    expect(() => parsePublicKey('not base64 at all!')).toThrow(VelsigilError);
+    for (const parse of [parsePublicKey, parsePublicKeyAllowingTestKeys]) {
+      expect(() => parse('')).toThrow(VelsigilError);
+      expect(() => parse('AAAA')).toThrow(VelsigilError);
+      expect(() => parse(Buffer.alloc(33).toString('base64'))).toThrow(VelsigilError);
+      expect(() => parse('not base64 at all!')).toThrow(VelsigilError);
+    }
   });
 });
 

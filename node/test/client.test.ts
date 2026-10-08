@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { createServer } from 'node:net';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,9 @@ import {
   VelsigilClient,
   VelsigilError,
   VelsigilResult,
+  parsePublicKey,
+  verifyEnvelope,
+  verifyLease,
   withTrialRef,
   type StoredState,
   type VelsigilClientOptions,
@@ -25,10 +28,16 @@ import {
   payloadFor,
   PRODUCT_ID,
   PUBLIC_KEY,
+  randomPublicKey,
   TEST_HWID,
   WRONG_KEY,
   signEnvelope,
 } from './helpers/mock-server.js';
+import { vectors } from './helpers/vectors.js';
+import { verifyEnvelopeAllowingTestKeys } from '../src/envelope.js';
+import { verifyLeaseAllowingTestKeys } from '../src/lease.js';
+import { parsePublicKeyAllowingTestKeys, PUBLISHED_TEST_KEY_MESSAGE, PUBLISHED_TEST_PUBLIC_KEYS } from '../src/signature.js';
+import * as sdk from '../src/index.js';
 
 const LICENSE_KEY = 'VSG-23456-789AB-CDEFG-HJKLM-NPQRS';
 const SECRET_1 = `dsk_${'A1b2C3d4'.repeat(5)}xyz`;
@@ -59,17 +68,47 @@ async function closedPort(): Promise<number> {
   return port;
 }
 
+/** The error `fn` throws (it must throw). */
+function thrownBy(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('expected a throw');
+}
+
+/** A product key pair: the public key as the panel shows it (standard base64 of the raw 32 bytes). */
+function productKeyPair(): { publicKey: string; privateKey: KeyObject } {
+  const pair = generateKeyPairSync('ed25519');
+  const { x } = pair.publicKey.export({ format: 'jwk' });
+  return { publicKey: Buffer.from(x!, 'base64url').toString('base64'), privateKey: pair.privateKey };
+}
+
+/** The `code` of the VelsigilError `fn` throws, or null when it does not throw. */
+function thrownCode(fn: () => unknown): string | null {
+  try {
+    fn();
+  } catch (error) {
+    expect(error).toBeInstanceOf(VelsigilError);
+    return (error as VelsigilError).code;
+  }
+  return null;
+}
+
 describe('configuration', () => {
   it('requires HTTPS except for loopback hosts', () => {
-    expect(() => new VelsigilClient('http://licenses.example.com', PRODUCT_ID, PUBLIC_KEY, { hwid: TEST_HWID })).toThrow(
+    // A product's own key: the vector keys are refused for non-loopback hosts (see "published test keys").
+    const key = randomPublicKey();
+    expect(() => new VelsigilClient('http://licenses.example.com', PRODUCT_ID, key, { hwid: TEST_HWID })).toThrow(
       VelsigilError,
     );
     for (const url of ['https://licenses.example.com', 'http://localhost:3000', 'http://127.0.0.1', 'http://[::1]:3000']) {
-      expect(() => new VelsigilClient(url, PRODUCT_ID, PUBLIC_KEY, { hwid: TEST_HWID })).not.toThrow();
+      expect(() => new VelsigilClient(url, PRODUCT_ID, key, { hwid: TEST_HWID })).not.toThrow();
     }
     expect(
       () =>
-        new VelsigilClient('http://licenses.example.com', PRODUCT_ID, PUBLIC_KEY, {
+        new VelsigilClient('http://licenses.example.com', PRODUCT_ID, key, {
           hwid: TEST_HWID,
           allowInsecureHttp: true,
         }),
@@ -77,21 +116,20 @@ describe('configuration', () => {
   });
 
   it('rejects unusable URLs, product ids, keys and options', () => {
-    const create = (url: string, productId = PRODUCT_ID, key = PUBLIC_KEY, options: VelsigilClientOptions = {}) =>
+    const ownKey = randomPublicKey();
+    const create = (url: string, productId = PRODUCT_ID, key = ownKey, options: VelsigilClientOptions = {}) =>
       () => new VelsigilClient(url, productId, key, { hwid: TEST_HWID, ...options });
     expect(create('ftp://licenses.example.com')).toThrow(VelsigilError);
     expect(create('https://user:pass@licenses.example.com')).toThrow(VelsigilError);
     expect(create('https://licenses.example.com/?x=1')).toThrow(VelsigilError);
     expect(create('licenses.example.com')).toThrow(VelsigilError);
     expect(create('https://licenses.example.com', 'not-a-uuid')).toThrow(VelsigilError);
-    expect(create('https://licenses.example.com', PRODUCT_ID, 'AAAA')).toThrow(VelsigilError);
-    expect(create('https://licenses.example.com', PRODUCT_ID, PUBLIC_KEY, { timeout: 0 })).toThrow(VelsigilError);
-    expect(create('https://licenses.example.com', PRODUCT_ID, PUBLIC_KEY, { hwid: 'short' })).toThrow(VelsigilError);
-    try {
-      create('http://licenses.example.com')();
-    } catch (error) {
-      expect((error as VelsigilError).code).toBe('invalid_configuration');
-    }
+    expect(thrownCode(create('https://licenses.example.com', PRODUCT_ID, 'AAAA'))).toBe('invalid_public_key');
+    expect(thrownCode(create('https://licenses.example.com', PRODUCT_ID, ownKey, { timeout: 0 }))).toBe('invalid_configuration');
+    expect(thrownCode(create('https://licenses.example.com', PRODUCT_ID, ownKey, { hwid: 'short' }))).toBe(
+      'invalid_configuration',
+    );
+    expect(thrownCode(create('http://licenses.example.com'))).toBe('invalid_configuration');
   });
 
   it('accepts an API URL that already contains /api/client/v1', async () => {
@@ -107,6 +145,255 @@ describe('configuration', () => {
     } catch (error) {
       expect((error as VelsigilError).code).toBe('hwid_unavailable');
     }
+  });
+});
+
+describe('published test keys (SDK test vectors)', () => {
+  const TEST_KEYS = [vectors.keys.publicKey, vectors.keys.wrongPublicKey];
+  const MESSAGE =
+    'This is the public test key from the Velsigil SDK test vectors, whose private key is published: anyone could ' +
+    "forge license answers for it. Use your product's public key (panel: Products > your product > Integration).";
+  const NON_LOOPBACK = [
+    'https://licenses.example.com',
+    'https://licenses.example.com:8443/base/api/client/v1',
+    'https://192.168.1.10',
+    'https://127.0.0.2',
+    'https://localhost.example.com',
+    'https://[::2]',
+    // Look-alikes of loopback hosts: none of them is localhost, 127.0.0.1 or [::1] after URL parsing.
+    'https://127.0.0.1.nip.io',
+    'https://localhost.',
+    'https://localhost%2eevil.com',
+    'https://[::ffff:127.0.0.1]',
+    'https://0.0.0.0',
+    'https://evil.example.com/localhost',
+  ];
+  const LOOPBACK = [
+    'http://localhost:3000',
+    'https://localhost',
+    'http://LOCALHOST:8080/base',
+    'http://127.0.0.1',
+    'https://127.0.0.1:8443',
+    'http://[::1]:3000',
+    'https://[0:0:0:0:0:0:0:1]',
+  ];
+  const create = (url: string, key: string, options: VelsigilClientOptions = {}) => () =>
+    new VelsigilClient(url, PRODUCT_ID, key, { hwid: TEST_HWID, ...options });
+
+  /** `fn` must throw exactly the published-test-key error. */
+  function expectRefused(fn: () => unknown, label: string): void {
+    const error = thrownBy(fn);
+    expect(error, label).toBeInstanceOf(VelsigilError);
+    expect((error as VelsigilError).code, label).toBe('invalid_public_key');
+    expect((error as VelsigilError).message, label).toBe(MESSAGE);
+  }
+
+  const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+  /**
+   * The same 32 bytes with the 2 unused low bits of the last base64 character set: a different string that
+   * base64 decoders (the SDK's included) read as the same key.
+   */
+  function nonCanonical(key: string): string {
+    const body = key.replace(/=+$/, '');
+    const last = BASE64_ALPHABET.indexOf(body.slice(-1));
+    return `${body.slice(0, -1)}${BASE64_ALPHABET.charAt(last | 3)}=`;
+  }
+
+  /** Other encodings of the same 32 bytes: base64url, unpadded, surrounding whitespace, non-canonical tail bits. */
+  function encodings(key: string): string[] {
+    const raw = Buffer.from(key, 'base64');
+    const loose = nonCanonical(key);
+    expect(loose).not.toBe(key);
+    expect(Buffer.from(loose, 'base64').equals(raw)).toBe(true);
+    return [
+      key,
+      key.replace(/=+$/, ''),
+      raw.toString('base64url'),
+      `  ${key}\n`,
+      loose,
+      loose.replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_'),
+    ];
+  }
+
+  it('the internal constant holds exactly the two vector keys and is not part of the public API', () => {
+    expect(PUBLISHED_TEST_PUBLIC_KEYS.map((key) => Buffer.from(key, 'base64').toString('hex'))).toEqual(
+      TEST_KEYS.map((key) => Buffer.from(key, 'base64').toString('hex')),
+    );
+    expect(PUBLISHED_TEST_KEY_MESSAGE).toBe(MESSAGE);
+    for (const internal of [
+      'PUBLISHED_TEST_PUBLIC_KEYS',
+      'PUBLISHED_TEST_KEY_MESSAGE',
+      'isPublishedTestKey',
+      'refusePublishedTestKey',
+      'resolvePublicKey',
+      'parsePublicKeyAllowingTestKeys',
+      'verifyEnvelopeAllowingTestKeys',
+      'verifyLeaseAllowingTestKeys',
+    ]) {
+      expect(Object.keys(sdk)).not.toContain(internal);
+    }
+  });
+
+  it('refuses both test keys (in any encoding) for non-loopback HTTPS URLs, like an invalid public key', () => {
+    for (const testKey of TEST_KEYS) {
+      for (const key of encodings(testKey)) {
+        for (const url of NON_LOOPBACK) {
+          let thrown: unknown = null;
+          try {
+            create(url, key)();
+          } catch (error) {
+            thrown = error;
+          }
+          expect(thrown, `${url} ${JSON.stringify(key)}`).toBeInstanceOf(VelsigilError);
+          expect((thrown as VelsigilError).code).toBe('invalid_public_key');
+          expect((thrown as VelsigilError).message).toBe(MESSAGE);
+        }
+      }
+      // A loopback name in the credentials, query or fragment never makes the host loopback (such URLs are refused).
+      for (const url of ['https://localhost@evil.example.com', 'https://evil.example.com?@localhost', 'https://evil.example.com#@127.0.0.1']) {
+        expect(create(url, testKey), url).toThrow(VelsigilError);
+      }
+    }
+  });
+
+  it('refuses both test keys for plain http to a non-loopback host even with allowInsecureHttp', () => {
+    for (const key of TEST_KEYS) {
+      expect(thrownCode(create('http://licenses.example.com', key, { allowInsecureHttp: true }))).toBe('invalid_public_key');
+      expect(thrownCode(create('http://10.0.0.5:3000', key, { allowInsecureHttp: true }))).toBe('invalid_public_key');
+    }
+  });
+
+  it('accepts both test keys (in any encoding) for loopback URLs', () => {
+    for (const testKey of TEST_KEYS) {
+      for (const key of encodings(testKey)) {
+        for (const url of LOOPBACK) {
+          expect(create(url, key), `${url} ${JSON.stringify(key)}`).not.toThrow();
+        }
+      }
+    }
+  });
+
+  it('accepts a real (random) product key for non-loopback URLs', () => {
+    for (let i = 0; i < 5; i++) {
+      const key = randomPublicKey();
+      for (const url of NON_LOOPBACK) {
+        expect(create(url, key), `${url} ${key}`).not.toThrow();
+      }
+      expect(create('http://licenses.example.com', key, { allowInsecureHttp: true })).not.toThrow();
+    }
+  });
+
+  it('a client with a test key on loopback still validates against the vector-signing server', async () => {
+    const result = await makeClient().validate(LICENSE_KEY);
+    expect(result.ok).toBe(true);
+  });
+
+  describe('public low-level helpers (parsePublicKey, verifyEnvelope, verifyLease)', () => {
+    const envelopeVector = vectors.envelopes.find((v) => v.name === 'validate_ok')!;
+    const envelopeExpectations = {
+      nonce: envelopeVector.requestNonce,
+      productId: envelopeVector.productId,
+      type: envelopeVector.requestType,
+      hwid: envelopeVector.hwid,
+    };
+    const leaseVector = vectors.leases.find((v) => v.name === 'lease_ok')!;
+    const leaseExpectations = { productId: leaseVector.productId, hwid: leaseVector.hwid, now: leaseVector.now };
+
+    it('refuse both test keys unconditionally (any encoding, or as a KeyObject), like an invalid key', () => {
+      for (const testKey of TEST_KEYS) {
+        // The same key imported through the internal path: handing over a KeyObject does not get around the check.
+        const keyObject = parsePublicKeyAllowingTestKeys(testKey);
+        for (const key of [...encodings(testKey), keyObject]) {
+          const label = typeof key === 'string' ? JSON.stringify(key) : 'KeyObject';
+          if (typeof key === 'string') expectRefused(() => parsePublicKey(key), `parsePublicKey ${label}`);
+          // Refused before anything is verified: even an authentic vector signed with that key is never returned.
+          expectRefused(() => verifyEnvelope(key, envelopeVector.envelope, envelopeExpectations), `verifyEnvelope ${label}`);
+          expectRefused(() => verifyLease(key, leaseVector.token, leaseExpectations), `verifyLease ${label}`);
+        }
+      }
+    });
+
+    it('throw the same error as the constructor does for a test key outside loopback', () => {
+      for (const testKey of TEST_KEYS) {
+        const fromConstructor = thrownBy(create('https://licenses.example.com', testKey)) as VelsigilError;
+        for (const fn of [
+          () => parsePublicKey(testKey),
+          () => verifyEnvelope(testKey, envelopeVector.envelope, envelopeExpectations),
+          () => verifyLease(testKey, leaseVector.token, leaseExpectations),
+        ]) {
+          const fromHelper = thrownBy(fn) as VelsigilError;
+          expect(fromHelper).toBeInstanceOf(VelsigilError);
+          expect([fromHelper.code, fromHelper.message]).toEqual([fromConstructor.code, fromConstructor.message]);
+        }
+      }
+    });
+
+    it('still throw the usual invalid_public_key error for a malformed key', () => {
+      for (const fn of [
+        () => parsePublicKey('AAAA'),
+        () => verifyEnvelope('AAAA', envelopeVector.envelope, envelopeExpectations),
+        () => verifyLease('AAAA', leaseVector.token, leaseExpectations),
+      ]) {
+        const error = thrownBy(fn) as VelsigilError;
+        expect(error).toBeInstanceOf(VelsigilError);
+        expect(error.code).toBe('invalid_public_key');
+        expect(error.message).not.toBe(MESSAGE);
+      }
+    });
+
+    it("still verify answers and leases signed with a product's own key", () => {
+      const { publicKey, privateKey } = productKeyPair();
+      expect(parsePublicKey(publicKey).asymmetricKeyType).toBe('ed25519');
+      const lease = makeLease({ iat: T0, exp: T0 + 86_400 }, privateKey);
+      const leaseCheck = { productId: PRODUCT_ID, hwid: TEST_HWID, now: T0 + 60 };
+      expect(verifyLease(publicKey, lease, leaseCheck).status).toBe('valid');
+      expect(verifyLease(parsePublicKey(publicKey), lease, leaseCheck).status).toBe('valid');
+      // An answer carrying a lease: verifyEnvelope's device-binding check verifies that lease with the same key.
+      const nonce = 'n'.repeat(43);
+      const request = {
+        method: 'POST',
+        path: '/api/client/v1/validate',
+        headers: {},
+        body: { nonce, productId: PRODUCT_ID, timestamp: T0 },
+      };
+      const envelope = signEnvelope(payloadFor(request, { lease: { token: lease, expiresAt: T0 + 86_400 } }), privateKey);
+      const expectations = { nonce, productId: PRODUCT_ID, type: 'validate' as const };
+      expect(verifyEnvelope(publicKey, envelope, { ...expectations, hwid: TEST_HWID }).status).toBe('valid');
+      expect(verifyEnvelope(publicKey, envelope, { ...expectations, hwid: 'another-device-hwid' }).status).toBe(
+        'hwid_mismatch',
+      );
+      // Nothing signed with a published test key passes for a product key.
+      expect(verifyEnvelope(publicKey, signEnvelope(payloadFor(request)), expectations).status).toBe('invalid_signature');
+    });
+
+    it('the internal paths (used by the client and the vector tests) still accept the test keys and verify the vectors', () => {
+      for (const testKey of TEST_KEYS) {
+        expect(parsePublicKeyAllowingTestKeys(testKey).asymmetricKeyType).toBe('ed25519');
+      }
+      const keyObject = parsePublicKeyAllowingTestKeys(vectors.keys.publicKey);
+      for (const key of [vectors.keys.publicKey, keyObject]) {
+        expect(verifyEnvelopeAllowingTestKeys(key, envelopeVector.envelope, envelopeExpectations).status).toBe('valid');
+        expect(verifyLeaseAllowingTestKeys(key, leaseVector.token, leaseExpectations).status).toBe('valid');
+      }
+      // The device-binding check inside the envelope verification runs on the internal lease path too.
+      const otherDevice = vectors.envelopes.find((v) => v.name === 'validate_lease_other_device')!;
+      const bound = verifyEnvelopeAllowingTestKeys(vectors.keys.publicKey, otherDevice.envelope, {
+        nonce: otherDevice.requestNonce,
+        productId: otherDevice.productId,
+        type: otherDevice.requestType,
+        hwid: otherDevice.hwid,
+      });
+      expect(bound.status).toBe('hwid_mismatch');
+      // The second test key verifies what it signed (the wrong_key vector) through the internal path as well.
+      const wrongKey = vectors.envelopes.find((v) => v.name === 'wrong_key')!;
+      const signedByWrongKey = verifyEnvelopeAllowingTestKeys(vectors.keys.wrongPublicKey, wrongKey.envelope, {
+        nonce: wrongKey.requestNonce,
+        productId: wrongKey.productId,
+        type: wrongKey.requestType,
+      });
+      expect(signedByWrongKey.status).not.toBe('invalid_signature');
+    });
   });
 });
 

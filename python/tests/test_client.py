@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -38,6 +39,7 @@ from velsigil_client import (  # noqa: E402
     Code,
     ConfigurationError,
     DownloadError,
+    Ed25519Verifier,
     FileStore,
     HardwareIdError,
     LicenseStore,
@@ -45,8 +47,11 @@ from velsigil_client import (  # noqa: E402
     StoredState,
     VelsigilClient,
     get_hardware_id,
+    key_id_for,
 )
+from velsigil_client import client as client_module  # noqa: E402
 from velsigil_client.client import MAX_RESPONSE_BYTES  # noqa: E402
+from velsigil_client.crypto import _decode_public_key, open_envelope, verify_lease  # noqa: E402
 from velsigil_client.models import LicenseInfo  # noqa: E402
 
 LICENSE_KEY = "VSG-ABCDE-FGHJK-LMNPQ-RSTVW-XYZ23"
@@ -1249,10 +1254,14 @@ class SafetyTests(ClientTestCase):
         self.assertTrue(all(b.get("deviceSecret") == DEVICE_SECRET for b in bodies[1:]))
 
 
+#: A "real" product key for clients on non-loopback URLs, which refuse the published vector keys.
+PRODUCT_KEY = ms.generate_public_key_b64()
+
+
 class ConfigurationTests(unittest.TestCase):
     def make(self, url="https://licenses.example.com", **options):
         options.setdefault("hwid", TEST_HWID)
-        return VelsigilClient(url, PRODUCT_ID, PUBLIC_KEY, **options)
+        return VelsigilClient(url, PRODUCT_ID, PRODUCT_KEY, **options)
 
     def test_https_required_except_localhost(self):
         with self.assertRaises(ConfigurationError):
@@ -1282,7 +1291,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_argument_validation(self):
         with self.assertRaises(ConfigurationError) as caught:
-            VelsigilClient("https://x.example.com", "not-a-uuid", PUBLIC_KEY, hwid=TEST_HWID)
+            VelsigilClient("https://x.example.com", "not-a-uuid", PRODUCT_KEY, hwid=TEST_HWID)
         self.assertEqual(caught.exception.code, Code.INVALID_CONFIGURATION)
         with self.assertRaises(ConfigurationError):
             VelsigilClient("https://x.example.com", PRODUCT_ID, "short", hwid=TEST_HWID)
@@ -1291,7 +1300,7 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(options=options):
                 with self.assertRaises(ConfigurationError):
                     self.make(**options)
-        upper = VelsigilClient("https://x.example.com", PRODUCT_ID.upper(), PUBLIC_KEY, hwid=TEST_HWID)
+        upper = VelsigilClient("https://x.example.com", PRODUCT_ID.upper(), PRODUCT_KEY, hwid=TEST_HWID)
         self.assertEqual(upper.product_id, PRODUCT_ID)
 
     def test_insecure_ssl_context_rejected(self):
@@ -1308,10 +1317,134 @@ class ConfigurationTests(unittest.TestCase):
             expected = get_hardware_id()
         except HardwareIdError as exc:
             self.skipTest("no machine id on this host: %s" % exc)
-        client = VelsigilClient("https://x.example.com", PRODUCT_ID, PUBLIC_KEY)
+        client = VelsigilClient("https://localhost", PRODUCT_ID, PUBLIC_KEY)  # the vector key: loopback only
         self.assertEqual(client.hwid, expected)
         self.assertEqual(VelsigilClient.get_hardware_id(), expected)
         self.assertEqual(client.key_id, ms.KEY_ID)
+
+
+class PublishedTestKeyTests(unittest.TestCase):
+    """The vector keys' private seeds are public: the client refuses them unless api_url is loopback."""
+
+    MESSAGE = (
+        "This is the public test key from the Velsigil SDK test vectors, whose private key is published: "
+        "anyone could forge license answers for it. Use your product's public key "
+        "(panel: Products > your product > Integration)."
+    )
+    TEST_KEYS = (ms.VECTORS["keys"]["publicKey"], ms.VECTORS["keys"]["wrongPublicKey"])
+
+    @staticmethod
+    def encodings(key):
+        """Other accepted spellings of the same 32 bytes: unpadded, surrounded by whitespace and, when
+        the decoder accepts it, non-canonical base64 (the 2 unused low bits of the last character set)."""
+        spellings = [key, key.rstrip("="), "  " + key + "\n", " " + key.rstrip("=") + "\t"]
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        body = key.rstrip("=")
+        non_canonical = body[:-1] + alphabet[alphabet.index(body[-1]) ^ 1] + "="
+        try:
+            # The internal decoder: the public decode_public_key refuses the test keys themselves.
+            if _decode_public_key(non_canonical) == _decode_public_key(key):
+                spellings.append(non_canonical)
+        except ConfigurationError:
+            pass  # a stricter decoder refuses it outright: not an accepted spelling
+        return tuple(spellings)
+
+    def make(self, url, key, **options):
+        options.setdefault("hwid", TEST_HWID)
+        return VelsigilClient(url, PRODUCT_ID, key, **options)
+
+    def test_test_keys_are_refused_on_non_loopback_urls(self):
+        urls = (
+            "https://licenses.example.com",
+            "https://licenses.example.com:8443/velsigil",
+            "https://localhost.example.com",
+            "https://127.0.0.1.example.com",
+            "https://10.0.0.5",
+        )
+        for key in self.TEST_KEYS:
+            for spelling in self.encodings(key):
+                for url in urls:
+                    with self.subTest(key=spelling, url=url):
+                        with self.assertRaises(ConfigurationError) as caught:
+                            self.make(url, spelling)
+                        self.assertEqual(str(caught.exception), self.MESSAGE)
+                        self.assertEqual(caught.exception.code, Code.INVALID_CONFIGURATION)
+                        self.assertIsInstance(caught.exception, ValueError)
+                # allow_insecure_http permits plain HTTP, never the test keys.
+                with self.subTest(key=spelling, url="http (allow_insecure_http)"):
+                    with self.assertRaises(ConfigurationError) as caught:
+                        self.make("http://licenses.example.com", spelling, allow_insecure_http=True)
+                    self.assertEqual(str(caught.exception), self.MESSAGE)
+
+    def test_refusal_takes_the_invalid_public_key_path(self):
+        # Same exception type (and code) the constructor raises for a malformed public key.
+        with self.assertRaises(ConfigurationError) as bad_key:
+            self.make("https://licenses.example.com", "short")
+        with self.assertRaises(ConfigurationError) as test_key:
+            self.make("https://licenses.example.com", self.TEST_KEYS[0])
+        self.assertIs(type(test_key.exception), type(bad_key.exception))
+        self.assertEqual(test_key.exception.code, bad_key.exception.code)
+
+    def test_test_keys_are_accepted_on_loopback_urls(self):
+        urls = (
+            "http://localhost:3000",
+            "https://localhost",
+            "HTTP://LOCALHOST",
+            "http://127.0.0.1",
+            "https://127.0.0.1:8443/velsigil",
+            "http://[::1]:3000",
+            "https://[::1]",
+        )
+        for key in self.TEST_KEYS:
+            for spelling in self.encodings(key):
+                for url in urls:
+                    with self.subTest(key=spelling, url=url):
+                        client = self.make(url, spelling)
+                        self.assertEqual(client.key_id, hashlib.sha256(_decode_public_key(key)).hexdigest()[:16])
+
+    def test_loopback_exemption_is_the_plain_http_rule(self):
+        # One helper decides both: every host that may use plain HTTP may use the test keys, and no other.
+        for host in sorted(client_module.LOCAL_HOSTS):
+            netloc = "[%s]" % host if ":" in host else host
+            for scheme in ("http", "https"):
+                with self.subTest(host=host, scheme=scheme):
+                    self.make("%s://%s:3000" % (scheme, netloc), self.TEST_KEYS[0])
+        # https, so the plain-HTTP rule (the same helper) cannot be what refuses it: the guard must.
+        with mock.patch.object(client_module, "_is_local_host", return_value=False):
+            with self.assertRaises(ConfigurationError) as caught:
+                self.make("https://localhost:3000", self.TEST_KEYS[0])
+            self.assertEqual(str(caught.exception), self.MESSAGE)
+        with mock.patch.object(client_module, "_is_local_host", return_value=True):
+            self.make("https://licenses.example.com", self.TEST_KEYS[1])
+
+    def test_real_keys_are_accepted_on_non_loopback_urls(self):
+        for _ in range(3):
+            key = ms.generate_public_key_b64()
+            with self.subTest(key=key):
+                self.assertNotIn(key, self.TEST_KEYS)
+                client = self.make("https://licenses.example.com", key)
+                self.assertEqual(client.key_id, key_id_for(key))
+                self.assertEqual(client.api_url, "https://licenses.example.com/api/client/v1")
+
+    def test_low_level_helpers_refuse_test_keys_even_where_the_client_allows_them(self):
+        # The helpers have no URL, so they refuse the test keys unconditionally: a loopback client may use one,
+        # but not even its own (internal) verifier passes the public helpers. Full coverage of the helpers:
+        # tests/test_vectors.py PublishedTestKeyHelperTests.
+        lease = make_lease(int(time.time()) + 3600)
+        for key in self.TEST_KEYS:
+            client = self.make("http://127.0.0.1:3000", key)
+            calls = {
+                "Ed25519Verifier": lambda: Ed25519Verifier(key),
+                "key_id_for": lambda: key_id_for(key),
+                "open_envelope": lambda: open_envelope(client._verifier, {}, "n", PRODUCT_ID, "validate"),
+                "verify_lease": lambda: verify_lease(client._verifier, lease, PRODUCT_ID, TEST_HWID, time.time()),
+            }
+            for name, call in calls.items():
+                with self.subTest(key=key, helper=name):
+                    with self.assertRaises(ConfigurationError) as caught:
+                        call()
+                    self.assertEqual(str(caught.exception), self.MESSAGE)
+                    self.assertEqual(caught.exception.code, Code.INVALID_CONFIGURATION)
 
 
 class FileStoreTests(unittest.TestCase):

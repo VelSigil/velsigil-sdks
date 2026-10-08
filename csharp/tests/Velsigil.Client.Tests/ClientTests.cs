@@ -823,6 +823,8 @@ public class ClientTests
     [Theory]
     [InlineData("http://licenses.example.com")]
     [InlineData("http://10.0.0.5:3000")]
+    [InlineData("http://[::ffff:127.0.0.1]:3000")] // plain http: exactly localhost, 127.0.0.1 and ::1
+    [InlineData("http://localhost.:3000")]
     [InlineData("ftp://licenses.example.com")]
     [InlineData("licenses.example.com")]
     [InlineData("https://user:pass@licenses.example.com")]
@@ -830,7 +832,8 @@ public class ClientTests
     [InlineData("")]
     public void Insecure_or_invalid_api_urls_are_rejected(string url)
     {
-        Assert.Throws<ArgumentException>(() => new VelsigilClient(url, Vectors.ProductId, Vectors.PublicKey,
+        // A freshly generated key: the published test-vector keys are refused for non-loopback hosts anyway.
+        Assert.Throws<ArgumentException>(() => new VelsigilClient(url, Vectors.ProductId, TestSigner.Random().PublicKeyBase64,
             new VelsigilClientOptions { Store = new MemoryStore(), HardwareId = Vectors.TestHwid }));
     }
 
@@ -843,7 +846,7 @@ public class ClientTests
     [InlineData("https://example.com/licensing/", "https://example.com/licensing/api/client/v1/")]
     public void Accepted_api_urls_resolve_to_the_client_api(string url, string expected)
     {
-        using var client = new VelsigilClient(url, Vectors.ProductId, Vectors.PublicKey,
+        using var client = new VelsigilClient(url, Vectors.ProductId, TestSigner.Random().PublicKeyBase64,
             new VelsigilClientOptions { Store = new MemoryStore(), HardwareId = Vectors.TestHwid });
         Assert.Equal(expected, client.ApiBaseUrl.ToString());
     }
@@ -851,7 +854,7 @@ public class ClientTests
     [Fact]
     public void Plain_http_to_a_remote_host_requires_explicit_opt_in()
     {
-        using var client = new VelsigilClient("http://licenses.example.com", Vectors.ProductId, Vectors.PublicKey,
+        using var client = new VelsigilClient("http://licenses.example.com", Vectors.ProductId, TestSigner.Random().PublicKeyBase64,
             new VelsigilClientOptions { Store = new MemoryStore(), HardwareId = Vectors.TestHwid, AllowInsecureHttp = true });
         Assert.Equal("http://licenses.example.com/api/client/v1/", client.ApiBaseUrl.ToString());
     }

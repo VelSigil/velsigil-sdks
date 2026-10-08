@@ -5,8 +5,10 @@
 #include <iostream>
 
 int main() {
+  // A random public key whose private key was never kept: the published test-vector key would be refused for
+  // this non-loopback URL (the SDK accepts it only for localhost, 127.0.0.1 and [::1]).
   velsigil::Client client("https://licenses.example.com", "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b",
-                          "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=");
+                          "uhcA7ddUfTb9JYWiduhJnH6MqsBrJ8avgaw4y2FaIdo=");
   if (!client.is_configured()) {
     std::cerr << "client rejected its configuration: " << client.configuration_error() << '\n';
     return 1;

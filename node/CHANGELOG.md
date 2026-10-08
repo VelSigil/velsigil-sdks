@@ -1,5 +1,30 @@
 # Changelog - Velsigil Node.js SDK (`velsigil-client`)
 
+## 1.0.2 (2026-10-08)
+
+### Security
+
+- The `VelsigilClient` constructor now refuses the two public test keys of the SDK test vectors
+  (`keys.publicKey` and `keys.wrongPublicKey` in `test-vectors.json`), whose private keys are published, so
+  anyone could forge license answers for an app that trusts them. It throws `VelsigilError` with code
+  `invalid_public_key` (the same error as a malformed key) unless the API URL's host is `localhost`,
+  `127.0.0.1` or `[::1]` (the hosts for which plain HTTP is allowed; one helper decides both). Keys are compared
+  as raw 32 bytes, so no other base64 encoding of them is accepted.
+- The README quick start no longer shows the test key: it uses the placeholder `"<your product's public key>"`.
+- The public low-level helpers `parsePublicKey`, `verifyEnvelope` and `verifyLease` now refuse the same two test
+  keys always (they have no API URL, so there is no loopback exception), as a base64 string in any form or as an
+  imported `KeyObject`. They throw what they already threw for an invalid key, `VelsigilError` with code
+  `invalid_public_key`, with the same message as the constructor, before anything is verified. Code that passed a
+  test key to these helpers must use the product's own key. The client itself and the SDK's own vector tests
+  use internal functions, not exported from the package, that accept the test keys; there is no public opt-out.
+- The example (`examples/basic.mjs`) no longer reads the API URL, product id and public key from the environment:
+  they are constants in the code with placeholders (`API_URL`, `PRODUCT_ID`, `PUBLIC_KEY`), and while a
+  placeholder is still in place the example prints a usage message and exits with code 2. For local testing,
+  `VELSIGIL_API_URL`, `VELSIGIL_PRODUCT_ID` and `VELSIGIL_PUBLIC_KEY` replace them only when the API URL is a
+  loopback URL (`localhost`, `127.0.0.1`, `[::1]`); with any other URL the example refuses them (exit code 2).
+  `VELSIGIL_ALLOW_INSECURE_HTTP` is gone (plain HTTP is allowed for loopback hosts anyway). The license key still
+  comes from `VELSIGIL_LICENSE_KEY`.
+
 ## 1.0.1 (2026-10-08)
 
 No code changes from 1.0.0. The release workflow of 1.0.0 published only the C++ source release on GitHub: its

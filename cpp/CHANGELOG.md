@@ -1,5 +1,36 @@
 # Changelog - Velsigil C++ SDK (`velsigil`)
 
+## 1.0.2 (2026-10-08)
+
+### Security
+
+- The `Client` constructor refuses the two public keys of the shared SDK test vectors (`keys.publicKey` and
+  `keys.wrongPublicKey` of `test-vectors.json`), whose private keys are published, so anyone could forge license
+  answers for an application that trusts them. The decoded key bytes are compared, so no other base64 encoding of
+  them slips through. The refusal takes the path of an invalid public key: `is_configured()` is false,
+  `configuration_error()` explains it and every call returns `invalid_configuration`. They stay accepted when the
+  API URL's host is `localhost`, `127.0.0.1` or `[::1]` (a local test server; the hosts that may also use plain
+  `http://`, decided by the same helper). `allow_insecure_http` does not extend this: a test key with any other
+  host (a LAN dev server such as `http://192.168.x.x` included) is refused. The low-level helpers refuse them
+  always (see below).
+- The README quick start and `examples/basic.cpp` now use the placeholder `<your product's public key>` instead of
+  the test key; the example prints a usage message and exits until it is set. An application that copied the old
+  value must switch to its product's public key (panel: Products > your product > Integration).
+- The public low-level helpers `verify_envelope_typed` and `verify_lease`, and the opt-in type-less
+  `verify_envelope` overloads (`VELSIGIL_ALLOW_UNTYPED_ENVELOPE`), refuse the same two test-vector keys, in any
+  base64 spelling, **always**: unlike the `Client` they have no API URL that could show a local test server. The
+  refusal takes the path of an invalid public key: status `invalid_signature`, no payload, no claims (these
+  helpers return a status, not a message). A custom integration that verified answers or leases with a test key
+  must use its product's public key. There is no public opt-out: the SDK's own tests verify the shared vectors
+  through internal entry points (`src/detail.hpp`, not installed and not part of the API).
+- `examples/basic.cpp`: the API URL and the product id are compiled-in placeholders now too
+  (`<your Velsigil server URL, e.g. https://licenses.example.com>`, `<your product id>`; the product id was the
+  mock server's). While any placeholder is in place it prints a short usage message and exits with code 2. Values
+  on the command line (the API URL, optionally followed by a product id and a public key) are for local testing
+  only and are accepted only with a `localhost`, `127.0.0.1` or `[::1]` API URL; any other URL is refused with
+  exit code 2 (before, any API URL was accepted there). The example reads none of these values from the
+  environment.
+
 ## 1.0.1 (2026-10-08)
 
 No code changes from 1.0.0. The release workflow of 1.0.0 published only the C++ source release on GitHub: its

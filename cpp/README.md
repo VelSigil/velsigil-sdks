@@ -160,9 +160,9 @@ int main() {
   // Persist the device secret and the offline lease between runs (owner-only file, atomic writes).
   options.store = std::make_shared<velsigil::FileStore>(velsigil::FileStore::default_path("MyApp"));
 
-  velsigil::Client client("https://licenses.example.com",              // your Velsigil server
-                         "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b",      // product id
-                         "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=",  // the SDKs' public TEST key: use your product's key
+  velsigil::Client client("https://licenses.example.com",            // your Velsigil server
+                         "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b",    // your product id
+                         "<your product's public key>",             // standard base64, compiled in
                          options);
 
   const std::string license_key = load_license_key();  // from your activation UI / settings
@@ -178,9 +178,15 @@ int main() {
 }
 ```
 
-The product id, public key and API URL are on the product's **Integration** tab in the Velsigil panel.
+The product id, public key and API URL are on the product's **Integration** tab in the Velsigil panel
+(Products > your product > Integration).
 `examples/basic.cpp` is a complete, runnable program (validation, feature gate, update check, verified
-download); its defaults match the bundled mock server.
+download). Its `kApiUrl`, `kProductId` and `kPublicKey` are compiled-in constants holding placeholders: replace
+them with your product's values and rebuild. While a placeholder is still in place it prints a short usage
+message and exits with code 2; it never reads these values from the environment. For local testing only it also
+takes `<api-url> [<product id> <public key>]` on the command line, and only when that API URL is on `localhost`,
+`127.0.0.1` or `[::1]` (any other URL is refused with exit code 2); `tests/mock_server/README.md` shows how to run
+it against the bundled mock server.
 
 ## API reference
 
@@ -196,7 +202,7 @@ Client(std::string api_url, std::string product_id, std::string public_key_base6
 |---|---|
 | `api_url` | Origin of your Velsigil server, e.g. `https://licenses.example.com` (a URL ending in `/api/client/v1` is accepted too). Must be `https://`; plain `http://` is accepted only for `localhost`, `127.0.0.1` and `[::1]` unless `allow_insecure_http` is set. URLs with credentials, query strings or fragments are rejected. |
 | `product_id` | Product UUID. |
-| `public_key_base64` | The product's raw 32-byte Ed25519 public key, standard base64 (padding optional). This key is the only key the SDK trusts; the envelope `kid` is never used to choose a key. |
+| `public_key_base64` | The product's raw 32-byte Ed25519 public key, standard base64 (padding optional). This key is the only key the SDK trusts; the envelope `kid` is never used to choose a key. The public keys of the SDK test vectors are refused like an invalid key unless the host of `api_url` is `localhost`, `127.0.0.1` or `[::1]` (see [Testing](#testing)). |
 | `options` | See `ClientOptions`. |
 
 The constructor never throws. Invalid arguments are recorded: `is_configured()` returns false,
@@ -293,11 +299,19 @@ request body, which contains the license key and device secret: never log it.
 
 ### Low-level helpers
 
+The low-level helpers (`verify_envelope_typed`, `verify_lease` and the opt-in `verify_envelope` overloads)
+refuse the two public keys of the shared test vectors (`keys.publicKey` and `keys.wrongPublicKey` of
+`test-vectors.json`, in any base64 spelling) **always**, exactly like an invalid public key: the status is
+`invalid_signature`, with no payload or claims. Their private keys are published, so anyone could forge answers
+and leases that verify with them, and unlike the `Client` (which accepts them for a `localhost`, `127.0.0.1` or
+`[::1]` API URL) these helpers have no API URL that could show a local test server. Pass your product's public
+key (Products > your product > Integration).
+
 | Function | Description |
 |---|---|
-| `verify_envelope_typed(envelope_json, public_key_base64, expected_nonce, expected_product_id, expected_type, expected_hwid)` | `EnvelopeVerification{ status, payload_json }` with `status` in `valid, invalid_signature, nonce_mismatch, product_mismatch, type_mismatch, hwid_mismatch, malformed`. `expected_type` is the endpoint the request went to (`"validate"`, `"deactivate"`, `"update_check"`, `"download"` or `"trial"`) and is always checked: the server also signs `ok: true` answers to update checks, which need no license, so an unchecked type lets such an answer pass as a validation. An empty `expected_type` never matches. With a non-empty `expected_hwid` (the hwid a device-bound request was sent with), a signed lease or `activation.hwidHash` of another device yields `hwid_mismatch` (a lease of another product `product_mismatch`); pass `""` for update checks. It has exactly one signature and no default arguments, so a call that leaves out an argument does not compile. |
+| `verify_envelope_typed(envelope_json, public_key_base64, expected_nonce, expected_product_id, expected_type, expected_hwid)` | `EnvelopeVerification{ status, payload_json }` with `status` in `valid, invalid_signature, nonce_mismatch, product_mismatch, type_mismatch, hwid_mismatch, malformed`. `expected_type` is the endpoint the request went to (`"validate"`, `"deactivate"`, `"update_check"`, `"download"` or `"trial"`) and is always checked: the server also signs `ok: true` answers to update checks, which need no license, so an unchecked type lets such an answer pass as a validation. An empty `expected_type` never matches. With a non-empty `expected_hwid` (the hwid a device-bound request was sent with), a signed lease or `activation.hwidHash` of another device yields `hwid_mismatch` (a lease of another product `product_mismatch`); pass `""` for update checks. An invalid public key or a published test-vector key yields `invalid_signature`. It has exactly one signature and no default arguments, so a call that leaves out an argument does not compile. |
 | `verify_envelope(envelope_json, public_key_base64, expected_nonce, expected_product_id[, expected_hwid])` | **Removed** (unsafe): these overloads do **not** check the payload `type`, so a signed update-check answer passes as a validation, and the fifth argument is the **hwid**, so `verify_envelope(env, key, nonce, product, "validate")` checks nothing about the type. Every call is now a compile error (*use of deleted function*): use `verify_envelope_typed`. Old code that cannot be changed yet can get them back, still `[[deprecated]]` and still unsafe, by defining `VELSIGIL_ALLOW_UNTYPED_ENVELOPE` for the **whole** program (e.g. `target_compile_definitions(app PUBLIC VELSIGIL_ALLOW_UNTYPED_ENVELOPE)`; never for single files). See [CHANGELOG.md](CHANGELOG.md). |
-| `verify_lease(token, public_key_base64, product_id, hwid, now)` | `LeaseVerification{ status, claims }` with `status` in `valid, expired, invalid_signature, product_mismatch, hwid_mismatch, malformed`. |
+| `verify_lease(token, public_key_base64, product_id, hwid, now)` | `LeaseVerification{ status, claims }` with `status` in `valid, expired, invalid_signature, product_mismatch, hwid_mismatch, malformed`. An invalid public key or a published test-vector key yields `invalid_signature` without claims. |
 | `compute_hardware_id(machine_id)` | `hex(SHA-256("vx-hwid-v1:" + lower(trim(machine_id))))`. |
 | `hash_hardware_id(hwid)` | `hex(SHA-256(hwid))`, the device hash used in leases. |
 | `to_string(EnvelopeStatus)`, `to_string(LeaseStatus)` | Status names (as in `test-vectors.json`). |
@@ -503,14 +517,26 @@ overtaken by a `validate` on another thread. `check_update` and `validate_offlin
 ctest --test-dir build --output-on-failure
 ```
 
+The private keys of the shared `test-vectors.json` (`keys.privateSeedBase64`, `keys.wrongPrivateSeedBase64`) are
+published, so the `Client` constructor refuses their public keys (`keys.publicKey`, `keys.wrongPublicKey`, in any
+base64 encoding) like an invalid public key unless the API URL's host is `localhost`, `127.0.0.1` or `[::1]`,
+the hosts that may also use plain `http://` (a local test server such as the bundled mock). The low-level
+helpers refuse them always (see [Low-level helpers](#low-level-helpers)), so the SDK's own tests verify the
+vectors through internal entry points (`src/detail.hpp`, not installed and not part of the API).
+
 - `velsigil_vector_tests` (mandatory): classifies every envelope and lease in the shared `test-vectors.json`
-  exactly as its `expect` field says, reproduces every HWID example and runs the leases through
-  `Client::validate_offline()`.
+  exactly as its `expect` field says (through those internal entry points), checks that `verify_envelope_typed`
+  and `verify_lease` refuse both published keys, reproduces every HWID example and runs the leases through
+  `Client::validate_offline()` (with a `localhost` API URL).
 - `velsigil_client_tests`: client behaviour against an in-process signing server (injected transport and
-  clock, signing with `keys.privateSeedBase64`): ok, business failure, nonce mismatch, bad signature, wrong
+  clock, signing with a key pair generated for the run): ok, business failure, nonce mismatch, bad signature, wrong
   key, `clock_skew` + successful retry, device secret persisted and re-sent, 400/429/500 and other unsigned
   errors, timeout, connection refused, offline fallback with lease expiry, the HTTPS policy for download
-  grants (`get_download`) and `download_release`, configuration hardening, `FileStore` (including the
-  read-only fallback to a legacy `veltrix-license.json`), concurrency.
+  grants (`get_download`) and `download_release`, configuration hardening (including the refusal of the
+  test-vector keys outside loopback hosts), the low-level helpers (a product's own key verifies, the published
+  test-vector key is refused), `FileStore` (including the read-only fallback to a legacy
+  `veltrix-license.json`), concurrency.
+- `velsigil_untyped_optin_tests`: the opt-in type-less `verify_envelope` overloads
+  (`VELSIGIL_ALLOW_UNTYPED_ENVELOPE`) compile, fail closed on garbage and refuse the published test-vector keys.
 - `velsigil_http_tests` (`-DVX_BUILD_HTTP_TESTS=ON`): the same flows over real HTTP with libcurl against
   `tests/mock_server/mock_server.py`, including verified downloads. See `tests/mock_server/README.md`.

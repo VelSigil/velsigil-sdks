@@ -105,6 +105,81 @@ std::string url_origin(std::string_view url) {
   return std::string(url.substr(0, path_start));
 }
 
+// The parts of an absolute URL the transport policy reads: the lowercased scheme and the host of the
+// authority (no port; an IPv6 literal keeps its brackets). `error` explains a URL without a usable host.
+// `host` views `url`, so it is valid only while `url` is. Shared by url_policy_error and is_loopback_url.
+struct UrlTarget {
+  std::string scheme;
+  std::string_view host;
+  std::optional<std::string> error;
+};
+
+UrlTarget parse_url_target(std::string_view url) {
+  UrlTarget out;
+  for (const char c : url) {
+    const auto u = static_cast<unsigned char>(c);
+    if (u <= 0x20 || u == 0x7F) {
+      out.error = std::string("The URL must not contain whitespace or control characters.");
+      return out;
+    }
+  }
+  const std::size_t scheme_end = url.find("://");
+  if (scheme_end == std::string_view::npos) {
+    out.error = std::string("The URL must be absolute (https://...).");
+    return out;
+  }
+  out.scheme = ascii_lower(url.substr(0, scheme_end));
+  const std::string_view rest = url.substr(scheme_end + 3);
+  const std::string_view authority = rest.substr(0, rest.find_first_of("/?#"));
+  if (authority.find('@') != std::string_view::npos) {
+    out.error = std::string("The URL must not contain credentials.");
+    return out;
+  }
+  std::string_view host = authority;
+  if (!host.empty() && host.front() == '[') {
+    const std::size_t close = host.find(']');
+    if (close == std::string_view::npos) {
+      out.error = std::string("The URL contains an invalid IPv6 address.");
+      return out;
+    }
+    host = host.substr(0, close + 1);
+  } else {
+    host = host.substr(0, host.find(':'));
+  }
+  if (host.empty()) {
+    out.error = std::string("The URL has no host.");
+    return out;
+  }
+  out.host = host;
+  return out;
+}
+
+// ---- published test keys ------------------------------------------------------------------------
+
+// The public keys of the shared SDK test vectors (sdks/test-vectors.json: keys.publicKey and
+// keys.wrongPublicKey). Their private seeds are published in the same file, so anyone can sign answers
+// that verify with them. The Client refuses them unless the API URL's host is loopback (a local test
+// server); the public low-level helpers (verify_envelope_typed, verify_lease and the opt-in untyped
+// verify_envelope) have no API URL and refuse them always. Internal; not part of the API.
+constexpr const char* kPublishedTestPublicKeys[] = {
+    "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=",
+    "b/OKSQM/kKwu80PNfHkda3EM9dk1/ZmNKkQz/1azw/Q=",
+};
+
+constexpr char kPublishedTestKeyError[] =
+    "This is the public test key from the Velsigil SDK test vectors, whose private key is published: anyone could "
+    "forge license answers for it. Use your product's public key (panel: Products > your product > Integration).";
+
+// Compares the decoded key bytes, so no other encoding of a test key (without padding, with surrounding
+// whitespace) slips through.
+bool is_published_test_key(const detail::PublicKey& key) {
+  for (const char* encoded : kPublishedTestPublicKeys) {
+    const auto test_key = detail::parse_public_key(encoded);
+    if (test_key && *test_key == key) return true;
+  }
+  return false;
+}
+
 // ---- results ------------------------------------------------------------------------------------
 
 ValidationResult failure(const char* code, std::string message) {
@@ -690,34 +765,24 @@ struct Interpreted {
 
 namespace detail {
 
+bool is_loopback_host(std::string_view host) noexcept {
+  return equals_ignore_case(host, "localhost") || equals_ignore_case(host, "127.0.0.1") || equals_ignore_case(host, "[::1]");
+}
+
 std::optional<std::string> url_policy_error(std::string_view url, bool allow_insecure_http) {
-  for (const char c : url) {
-    const auto u = static_cast<unsigned char>(c);
-    if (u <= 0x20 || u == 0x7F) return std::string("The URL must not contain whitespace or control characters.");
-  }
-  const std::size_t scheme_end = url.find("://");
-  if (scheme_end == std::string_view::npos) return std::string("The URL must be absolute (https://...).");
-  const std::string scheme = ascii_lower(url.substr(0, scheme_end));
-  const std::string_view rest = url.substr(scheme_end + 3);
-  const std::string_view authority = rest.substr(0, rest.find_first_of("/?#"));
-  if (authority.find('@') != std::string_view::npos) return std::string("The URL must not contain credentials.");
-  std::string_view host = authority;
-  if (!host.empty() && host.front() == '[') {
-    const std::size_t close = host.find(']');
-    if (close == std::string_view::npos) return std::string("The URL contains an invalid IPv6 address.");
-    host = host.substr(0, close + 1);
-  } else {
-    host = host.substr(0, host.find(':'));
-  }
-  if (host.empty()) return std::string("The URL has no host.");
-  if (scheme == "https") return std::nullopt;
-  if (scheme != "http") return std::string("Only https:// URLs are supported.");
-  if (allow_insecure_http) return std::nullopt;
-  const std::string lowered = ascii_lower(host);
-  if (lowered == "localhost" || lowered == "127.0.0.1" || lowered == "[::1]") return std::nullopt;
+  UrlTarget target = parse_url_target(url);
+  if (target.error) return std::move(target.error);
+  if (target.scheme == "https") return std::nullopt;
+  if (target.scheme != "http") return std::string("Only https:// URLs are supported.");
+  if (allow_insecure_http || is_loopback_host(target.host)) return std::nullopt;
   return std::string(
       "HTTPS is required; plain http:// is only accepted for localhost, 127.0.0.1 and [::1] unless "
       "allow_insecure_http is set.");
+}
+
+bool is_loopback_url(std::string_view url) {
+  const UrlTarget target = parse_url_target(url);
+  return !target.error && is_loopback_host(target.host);
 }
 
 std::int64_t system_unix_time() noexcept {
@@ -831,16 +896,24 @@ std::optional<std::int64_t> ValidationResult::days_until_expiry() const noexcept
 
 namespace {
 
-// Shared by verify_envelope_typed and untyped_detail::verify_envelope_untyped (the opt-in, deprecated
-// verify_envelope overloads); `expected_type` is std::nullopt only for the latter.
+// Whether a low-level helper refuses the published test-vector keys. The public helpers always pass
+// `refuse`: unlike the Client they have no API URL that could name a local test server. Only the internal
+// detail::*_unguarded entry points (the SDK's own test-vector conformance tests) pass `accept`.
+enum class TestKeys { refuse, accept };
+
+// Shared by verify_envelope_typed, untyped_detail::verify_envelope_untyped (the opt-in, deprecated
+// verify_envelope overloads) and detail::verify_envelope_typed_unguarded; `expected_type` is std::nullopt
+// only for the untyped one.
 EnvelopeVerification verify_envelope_text(std::string_view envelope_json, std::string_view public_key_base64,
                                           std::string_view expected_nonce, std::string_view expected_product_id,
-                                          std::optional<std::string_view> expected_type,
-                                          std::string_view expected_hwid) noexcept {
+                                          std::optional<std::string_view> expected_type, std::string_view expected_hwid,
+                                          TestKeys test_keys) noexcept {
   try {
     EnvelopeVerification verification;
     const auto key = detail::parse_public_key(public_key_base64);
-    if (!key) return verification;
+    // A published test-vector key takes the path of an invalid key (invalid_signature, no payload): anyone
+    // can sign answers that verify with it.
+    if (!key || (test_keys == TestKeys::refuse && is_published_test_key(*key))) return verification;
     const json envelope = json::parse(std::string(envelope_json), nullptr, false);
     if (envelope.is_discarded()) return verification;
     OpenedEnvelope opened =
@@ -853,13 +926,30 @@ EnvelopeVerification verify_envelope_text(std::string_view envelope_json, std::s
   }
 }
 
+// Shared by verify_lease and detail::verify_lease_unguarded.
+LeaseVerification verify_lease_text(std::string_view token, std::string_view public_key_base64, std::string_view product_id,
+                                    std::string_view hwid, std::int64_t now_unix, TestKeys test_keys) noexcept {
+  try {
+    const auto key = detail::parse_public_key(public_key_base64);
+    // A published test-vector key takes the path of an invalid key (see verify_envelope_text).
+    if (!key || (test_keys == TestKeys::refuse && is_published_test_key(*key))) {
+      LeaseVerification verification;
+      verification.status = LeaseStatus::invalid_signature;
+      return verification;
+    }
+    return check_lease(token, *key, product_id, hwid, now_unix);
+  } catch (...) {
+    return LeaseVerification{};
+  }
+}
+
 }  // namespace
 
 EnvelopeVerification verify_envelope_typed(std::string_view envelope_json, std::string_view public_key_base64,
                                            std::string_view expected_nonce, std::string_view expected_product_id,
                                            std::string_view expected_type, std::string_view expected_hwid) noexcept {
   return verify_envelope_text(envelope_json, public_key_base64, expected_nonce, expected_product_id,
-                              std::optional<std::string_view>(expected_type), expected_hwid);
+                              std::optional<std::string_view>(expected_type), expected_hwid, TestKeys::refuse);
 }
 
 // Behind the opt-in, deprecated and unsafe `verify_envelope` overloads of client.hpp (no type check),
@@ -870,24 +960,30 @@ EnvelopeVerification verify_envelope_untyped(std::string_view envelope_json, std
                                              std::string_view expected_nonce, std::string_view expected_product_id,
                                              std::string_view expected_hwid) noexcept {
   return verify_envelope_text(envelope_json, public_key_base64, expected_nonce, expected_product_id, std::nullopt,
-                              expected_hwid);
+                              expected_hwid, TestKeys::refuse);
 }
 }  // namespace untyped_detail
 
 LeaseVerification verify_lease(std::string_view token, std::string_view public_key_base64, std::string_view product_id,
                                std::string_view hwid, std::int64_t now_unix) noexcept {
-  try {
-    const auto key = detail::parse_public_key(public_key_base64);
-    if (!key) {
-      LeaseVerification verification;
-      verification.status = LeaseStatus::invalid_signature;
-      return verification;
-    }
-    return check_lease(token, *key, product_id, hwid, now_unix);
-  } catch (...) {
-    return LeaseVerification{};
-  }
+  return verify_lease_text(token, public_key_base64, product_id, hwid, now_unix, TestKeys::refuse);
 }
+
+// Internal entry points for the SDK's own test-vector conformance tests (declared in detail.hpp, not
+// installed): the same verification without the refusal of the published test-vector keys.
+namespace detail {
+EnvelopeVerification verify_envelope_typed_unguarded(std::string_view envelope_json, std::string_view public_key_base64,
+                                                     std::string_view expected_nonce, std::string_view expected_product_id,
+                                                     std::string_view expected_type, std::string_view expected_hwid) noexcept {
+  return verify_envelope_text(envelope_json, public_key_base64, expected_nonce, expected_product_id,
+                              std::optional<std::string_view>(expected_type), expected_hwid, TestKeys::accept);
+}
+
+LeaseVerification verify_lease_unguarded(std::string_view token, std::string_view public_key_base64,
+                                         std::string_view product_id, std::string_view hwid, std::int64_t now_unix) noexcept {
+  return verify_lease_text(token, public_key_base64, product_id, hwid, now_unix, TestKeys::accept);
+}
+}  // namespace detail
 
 const char* to_string(EnvelopeStatus status) noexcept {
   switch (status) {
@@ -994,6 +1090,9 @@ struct Client::Impl {
 
     if (const auto key = detail::parse_public_key(public_key_base64)) {
       public_key = *key;
+      // A published test-vector key is only good for a local test server: the hosts that may also use plain
+      // http:// (the same helper decides both), whatever the scheme. Elsewhere it would accept forged answers.
+      if (is_published_test_key(*key) && !detail::is_loopback_url(endpoint_base)) reject(kPublishedTestKeyError);
     } else {
       reject("The public key must be the standard base64 encoding of a raw 32-byte Ed25519 key.");
     }

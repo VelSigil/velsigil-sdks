@@ -49,7 +49,7 @@ public class VectorTests
         Assert.Equal(Vectors.WrongPublicKey, TestSigner.Wrong.PublicKeyBase64);
         Assert.Equal(Vectors.KeyId, PinnedKey.KeyId);
 
-        using var client = new VelsigilClient("https://licenses.example.test", Vectors.ProductId, Vectors.PublicKey,
+        using var client = new VelsigilClient(TestClients.ApiUrl, Vectors.ProductId, Vectors.PublicKey,
             new VelsigilClientOptions { HardwareId = Vectors.TestHwid, Store = new MemoryStore() });
         Assert.Equal(Vectors.KeyId, client.KeyId);
     }
@@ -182,9 +182,10 @@ public class VectorTests
     public void Lease_vector_is_classified_as_expected(string name)
     {
         var vector = Vectors.Lease(name);
+        // The internal overload: the public one refuses the published vector keys (PublishedTestKeyTests).
         var result = LeaseVerifier.Verify(
             vector.GetProperty("token").GetString(),
-            Vectors.PublicKey,
+            PinnedKey,
             vector.GetProperty("productId").GetString()!,
             vector.GetProperty("hwid").GetString()!,
             DateTimeOffset.FromUnixTimeSeconds(vector.GetProperty("now").GetInt64()));
@@ -230,7 +231,7 @@ public class VectorTests
         var store = new MemoryStore();
         store.SetLeaseToken(Vectors.ProductId, vector.GetProperty("token").GetString());
         var clock = new FakeClock(vector.GetProperty("now").GetInt64());
-        using var client = new VelsigilClient("https://licenses.example.test", vector.GetProperty("productId").GetString()!, Vectors.PublicKey,
+        using var client = new VelsigilClient(TestClients.ApiUrl, vector.GetProperty("productId").GetString()!, Vectors.PublicKey,
             new VelsigilClientOptions { HardwareId = vector.GetProperty("hwid").GetString(), Store = store, Clock = clock.GetNow });
 
         var result = client.ValidateOffline();
@@ -362,8 +363,8 @@ public class VectorTests
     public void Lease_verification_rejects_lease_signed_with_the_wrong_key_even_with_matching_claims()
     {
         var vector = Vectors.Lease("lease_wrong_key");
-        var result = LeaseVerifier.Verify(vector.GetProperty("token").GetString(), Vectors.WrongPublicKey, Vectors.ProductId,
-            Vectors.TestHwid, DateTimeOffset.FromUnixTimeSeconds(vector.GetProperty("now").GetInt64()));
+        var result = LeaseVerifier.Verify(vector.GetProperty("token").GetString(), Ed25519Verifier.FromBase64(Vectors.WrongPublicKey),
+            Vectors.ProductId, Vectors.TestHwid, DateTimeOffset.FromUnixTimeSeconds(vector.GetProperty("now").GetInt64()));
         // Under its own (wrong) key the token is authentic - proving the vector really tests key pinning.
         Assert.Equal(LeaseStatus.Valid, result.Status);
     }

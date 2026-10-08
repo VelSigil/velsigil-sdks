@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, randomUUID, sign, type KeyObject } from 'node:crypto';
+import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, sign, type KeyObject } from 'node:crypto';
 import { createServer, type IncomingHttpHeaders, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { vectors } from './vectors.js';
@@ -16,6 +16,15 @@ export const WRONG_KEY = privateKeyFromSeed(vectors.keys.wrongPrivateSeedBase64)
 export const PUBLIC_KEY = vectors.keys.publicKey;
 export const PRODUCT_ID = '0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b';
 export const TEST_HWID = 'test-hwid-0001-abcdef';
+
+/**
+ * A freshly generated Ed25519 public key (standard base64 of the raw 32 bytes, like the panel shows it).
+ * For tests that build a client for a non-loopback URL: the vector keys are refused there.
+ */
+export function randomPublicKey(): string {
+  const { x } = generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' });
+  return Buffer.from(x!, 'base64url').toString('base64');
+}
 
 /** Signs a payload exactly like the server: base64url(UTF-8 JSON) + Ed25519 over the ASCII data. */
 export function signEnvelope(payload: unknown, key: KeyObject = GOOD_KEY): { data: string; sig: string; kid: string } {

@@ -2,12 +2,12 @@ import type { KeyObject } from 'node:crypto';
 import { LEASE_REVOKING_CODES, UNSIGNED_ERROR_CODES, type VelsigilCode } from './codes.js';
 import { downloadToFile, type DownloadFileOptions, type DownloadFileResult } from './download.js';
 import { generateNonce, parseJsonBytes } from './encoding.js';
-import { verifyEnvelope } from './envelope.js';
+import { verifyEnvelopeAllowingTestKeys } from './envelope.js';
 import { VelsigilError } from './errors.js';
 import { isObject, isOneOf, UUID_RE } from './guards.js';
 import { parseRetryAfter, postJson, type FetchFunction, type HttpOutcome } from './http.js';
 import { getHardwareId } from './hwid.js';
-import { verifyLease } from './lease.js';
+import { verifyLeaseAllowingTestKeys } from './lease.js';
 import { Mutex } from './mutex.js';
 import {
   VelsigilResult,
@@ -16,7 +16,7 @@ import {
   type LicenseInfo,
   type ResultInit,
 } from './result.js';
-import { parsePublicKey } from './signature.js';
+import { isPublishedTestKey, parsePublicKeyAllowingTestKeys, PUBLISHED_TEST_KEY_MESSAGE } from './signature.js';
 import { emptyState, MemoryStore, sanitizeState, type StoredState, type VelsigilStore } from './store.js';
 import type { LeasePayload, ProtocolLicense, RequestType, ResponsePayload } from './types.js';
 import { SDK_VERSION } from './version.js';
@@ -150,8 +150,10 @@ export class VelsigilClient {
    *   `/api/client/v1` is accepted too). HTTPS is required except for localhost/127.0.0.1/::1.
    * @param productId The product UUID from the Velsigil panel.
    * @param publicKeyBase64 The product's Ed25519 public key (base64) from the panel. Ship it inside
-   *   your application; it is the only key the client trusts.
-   * @throws {VelsigilError} for invalid configuration or when no hardware id can be determined.
+   *   your application; it is the only key the client trusts. The public test keys of the SDK test
+   *   vectors (whose private keys are published) are refused unless `apiUrl` is a loopback host.
+   * @throws {VelsigilError} for invalid configuration (`invalid_public_key` for a malformed key or a
+   *   published test key outside loopback) or when no hardware id can be determined.
    */
   constructor(apiUrl: string, productId: string, publicKeyBase64: string, options: VelsigilClientOptions = {}) {
     if (options === null || typeof options !== 'object') {
@@ -164,7 +166,13 @@ export class VelsigilClient {
       throw new VelsigilError('invalid_configuration', 'productId must be the product UUID from the Velsigil panel');
     }
     this.productId = productId.trim().toLowerCase();
-    this.#publicKey = parsePublicKey(publicKeyBase64);
+    // The published test keys of the SDK test vectors are accepted only for a loopback API URL (the public
+    // low-level helpers, which have no URL, refuse them always). Every verification below uses this key through
+    // the internal `...AllowingTestKeys` paths, so the loopback decision made here is the only one.
+    this.#publicKey = parsePublicKeyAllowingTestKeys(publicKeyBase64);
+    if (isPublishedTestKey(this.#publicKey) && !isLoopbackHost(this.#base.hostname)) {
+      throw new VelsigilError('invalid_public_key', PUBLISHED_TEST_KEY_MESSAGE);
+    }
 
     const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
     if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0 || timeout > MAX_TIMEOUT_MS) {
@@ -475,7 +483,12 @@ export class VelsigilClient {
       if (!json.ok) {
         return { payload: null, result: localFailure('invalid_response', 'The server response is not valid JSON.', type) };
       }
-      const verification = verifyEnvelope(this.#publicKey, json.value, { nonce, productId: this.productId, type, hwid });
+      const verification = verifyEnvelopeAllowingTestKeys(this.#publicKey, json.value, {
+        nonce,
+        productId: this.productId,
+        type,
+        hwid,
+      });
       if (verification.status !== 'valid') {
         return {
           payload: null,
@@ -590,7 +603,7 @@ export class VelsigilClient {
       if (payload.lease !== null) {
         // The envelope check already rejected a lease bound to another device or product; this
         // re-check only decides whether the lease is usable (signature, expiry) and gets its exp.
-        const check = verifyLease(this.#publicKey, payload.lease.token, {
+        const check = verifyLeaseAllowingTestKeys(this.#publicKey, payload.lease.token, {
           productId: this.productId,
           hwid: this.hardwareId,
           now: payload.serverTime,
@@ -616,7 +629,7 @@ export class VelsigilClient {
       return new VelsigilResult({ ok: false, code: 'no_lease', message: 'No offline lease is stored.', offline: true });
     }
     const now = this.#serverNowSeconds();
-    const check = verifyLease(this.#publicKey, state.lease.token, {
+    const check = verifyLeaseAllowingTestKeys(this.#publicKey, state.lease.token, {
       productId: this.productId,
       hwid: this.hardwareId,
       now,
@@ -698,7 +711,7 @@ export class VelsigilClient {
     }
     if (url.username || url.password) return null;
     if (url.protocol === 'https:') return url.toString();
-    if (url.protocol === 'http:' && (this.#allowInsecureHttp || LOOPBACK_HOSTS.has(url.hostname))) {
+    if (url.protocol === 'http:' && (this.#allowInsecureHttp || isLoopbackHost(url.hostname))) {
       return url.toString();
     }
     return null;
@@ -707,6 +720,15 @@ export class VelsigilClient {
 
 // -----------------------------------------------------------------------------------------------
 // Helpers
+
+/**
+ * Loopback hosts (a parsed URL's `hostname`): the only hosts for which plain `http://` is allowed without
+ * `allowInsecureHttp`, and the only ones for which the constructor accepts a published test key. One helper
+ * for both rules, so they cannot drift apart.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  return LOOPBACK_HOSTS.has(hostname);
+}
 
 function resolveApiBase(apiUrl: string, allowInsecureHttp: boolean): URL {
   let url: URL;
@@ -722,7 +744,7 @@ function resolveApiBase(apiUrl: string, allowInsecureHttp: boolean): URL {
     throw new VelsigilError('invalid_configuration', 'apiUrl must not contain a query string or fragment');
   }
   if (url.protocol === 'http:') {
-    if (!allowInsecureHttp && !LOOPBACK_HOSTS.has(url.hostname)) {
+    if (!allowInsecureHttp && !isLoopbackHost(url.hostname)) {
       throw new VelsigilError(
         'invalid_configuration',
         'apiUrl must use https:// (plain http is only allowed for localhost unless allowInsecureHttp is set)',

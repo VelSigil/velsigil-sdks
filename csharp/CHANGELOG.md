@@ -1,5 +1,39 @@
 # Changelog - Velsigil .NET SDK (`Velsigil.Client`)
 
+## 1.0.2 (2026-10-08)
+
+### Security
+
+- The `VelsigilClient` constructor now refuses the two public keys of the SDK test vectors (`keys.publicKey` and
+  `keys.wrongPublicKey` in `test-vectors.json`), whose private keys are published, so anyone could forge license
+  answers for an app that trusts them. It throws the same `ArgumentException` (parameter `publicKeyBase64`) as for
+  an invalid key, unless the API URL's host is `localhost`, `127.0.0.1` or `::1` (the hosts plain http is allowed
+  for). Keys are compared as decoded bytes, so no other encoding of them gets through.
+- `LeaseVerifier.Verify(token, publicKeyBase64, productId, hwid, now)`, the public low-level helper that takes a
+  public key (the only one in this SDK; envelope verification is internal), now refuses the same two test keys, in
+  any encoding, with the same `ArgumentException` (parameter `publicKeyBase64`) and message as the constructor.
+  It has no server URL, so there is no loopback exception and no opt-out, and the key is checked before the token.
+  Before, it accepted them, so an app that verified its own stored leases with a test key accepted leases anyone
+  could sign. Pass your product's public key. `ValidateOffline()` is unchanged (it uses the key the constructor
+  accepted); the SDK's own lease-vector tests use an internal overload that is not part of the public API.
+- The README quick start used the test public key as its example value; it now shows a placeholder
+  (`<your product's public key>`). An app that copied the old value must switch to its product's key from the
+  panel (Products > your product > Integration).
+- The console example (`examples/ConsoleExample`) no longer reads the API URL, product id and public key from the
+  environment: they are compiled-in constants (`ApiUrl`, `ProductId`, `PublicKey` in `Program.cs`) with
+  placeholders, as in a real application. While a placeholder is still in place it prints a usage message and
+  exits with code 2. For local testing, `VELSIGIL_URL`, `VELSIGIL_PRODUCT_ID` and `VELSIGIL_PUBLIC_KEY` still
+  override the constants, but only when the API URL is loopback (`localhost`, `127.0.0.1` or `[::1]`); with any
+  other URL the example refuses to start (exit code 2). A refused or otherwise invalid key is reported as
+  `Invalid configuration` (exit code 2). `VELSIGIL_LICENSE_KEY` and `VELSIGIL_APP_VERSION` are unchanged.
+
+### Fixed
+
+- On .NET Framework (the `netstandard2.0` asset), `[::1]` was not recognised as loopback: its `Uri.Host` is
+  spelled `[0000:0000:0000:0000:0000:0000:0000:0001]` there, so plain `http://[::1]` was rejected (and the test
+  keys would have been refused for it). The loopback check now compares an IPv6 host as an address: exactly `::1`
+  (not `::ffff:127.0.0.1`). Behaviour on .NET Core / .NET 5+ is unchanged.
+
 ## 1.0.1 (2026-10-08)
 
 No code changes from 1.0.0. The release workflow of 1.0.0 published only the C++ source release on GitHub: its

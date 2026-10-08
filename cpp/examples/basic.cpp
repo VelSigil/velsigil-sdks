@@ -1,27 +1,73 @@
 // Velsigil C++ SDK example: validate a license (with offline fallback), gate a feature, check for
 // updates and download + verify a release.
 //
-// Build with -DVX_BUILD_EXAMPLES=ON, then run:
-//   velsigil_example_basic                          (uses the values below)
-//   velsigil_example_basic http://localhost:3000    (override the server URL, e.g. a local dev server)
-// The license key is read from standard input and never printed or logged.
+// Replace the placeholders kApiUrl, kProductId and kPublicKey below with your product's values, build with
+// -DVX_BUILD_EXAMPLES=ON, then run `velsigil_example_basic`. While a placeholder is still in place it prints a
+// short usage message and exits with code 2. The license key is read from standard input and never printed or
+// logged.
+//
+// Local testing only: the three values can be given on the command line instead, and ONLY when the API URL given
+// there is a loopback URL (http(s)://localhost, 127.0.0.1 or [::1], such as the bundled mock server; see
+// tests/mock_server/README.md):
+//   velsigil_example_basic http://127.0.0.1:8787 [<product id> <public key>]
+// An override with any other URL is refused (exit code 2): a shipped application takes its server, product id and
+// public key from its own binary, never from outside it.
 #include <velsigil/client.hpp>
 
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace {
 
-// Replace these with the values from the product's "Integration" tab in the Velsigil panel. The
-// defaults are the shared test-vector product, so the example also runs against the bundled mock
-// server (tests/mock_server/mock_server.py, license key VX-OK). Keep the public key compiled into
-// the binary: it is the trust anchor that makes forged server responses detectable.
-constexpr char kApiUrl[] = "https://licenses.example.com";
-constexpr char kProductId[] = "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b";
-constexpr char kPublicKey[] = "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=";
+// Replace these placeholders with the values from your product's "Integration" tab in the Velsigil panel
+// (Products > your product > Integration). Keep them compiled into the binary, above all the public key: it is
+// the trust anchor that makes forged server responses detectable (never load it from a file, environment
+// variable or the network).
+constexpr char kApiUrl[] = "<your Velsigil server URL, e.g. https://licenses.example.com>";
+constexpr char kProductId[] = "<your product id>";
+constexpr char kPublicKey[] = "<your product's public key>";
 constexpr char kAppVersion[] = "1.2.0";
+
+constexpr char kUsage[] =
+    "usage: velsigil_example_basic\n"
+    "       velsigil_example_basic <loopback API URL> [<product id> <public key>]   (local testing only)\n"
+    "Set kApiUrl, kProductId and kPublicKey in examples/basic.cpp to your product's values from the Velsigil\n"
+    "panel (Products > your product > Integration), then rebuild. Values on the command line are accepted only\n"
+    "with an API URL on localhost, 127.0.0.1 or [::1].\n";
+
+// The hosts of a server on this machine (the SDK accepts plain http:// only for them).
+constexpr std::string_view kLoopbackHosts[] = {"localhost", "127.0.0.1", "[::1]"};
+
+// A value that still holds its "<...>" placeholder.
+bool is_placeholder(std::string_view value) { return value.empty() || value.front() == '<'; }
+
+// True for an http(s) URL whose host is localhost, 127.0.0.1 or [::1] (any port and path).
+bool is_loopback_url(std::string_view url) {
+  std::string lower(url);
+  for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  std::string_view rest(lower);
+  if (rest.substr(0, 7) == "http://") {
+    rest.remove_prefix(7);
+  } else if (rest.substr(0, 8) == "https://") {
+    rest.remove_prefix(8);
+  } else {
+    return false;
+  }
+  const std::string_view authority = rest.substr(0, rest.find_first_of("/?#"));
+  // User info names no host: in "http://localhost:80@evil.example" the host is evil.example.
+  if (authority.find('@') != std::string_view::npos) return false;
+  for (const std::string_view host : kLoopbackHosts) {
+    if (authority == host || (authority.size() > host.size() && authority.substr(0, host.size()) == host &&
+                              authority[host.size()] == ':')) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // Defense in depth: never let a server-provided name choose a directory.
 std::string safe_file_name(const std::string& name) {
@@ -51,7 +97,31 @@ void print_result(const velsigil::ValidationResult& result) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string api_url = argc > 1 ? std::string(argv[1]) : std::string(kApiUrl);
+  std::string api_url = kApiUrl;
+  std::string product_id = kProductId;
+  std::string public_key = kPublicKey;
+  if (argc == 2 || argc == 4) {
+    // Local testing only: values from the command line are accepted ONLY with a loopback API URL (a server on
+    // this machine, such as the bundled mock server), never for a remote server.
+    if (!is_loopback_url(argv[1])) {
+      std::cerr << "Values on the command line are for local testing only: the API URL must be on localhost, "
+                   "127.0.0.1 or [::1].\n"
+                << kUsage;
+      return 2;
+    }
+    api_url = argv[1];
+    if (argc == 4) {
+      product_id = argv[2];
+      public_key = argv[3];
+    }
+  } else if (argc != 1) {
+    std::cerr << kUsage;
+    return 2;
+  }
+  if (is_placeholder(api_url) || is_placeholder(product_id) || is_placeholder(public_key)) {
+    std::cerr << kUsage;
+    return 2;
+  }
 
   // Persist the device secret and offline lease between runs (owner-only file, atomic writes).
   velsigil::ClientOptions options;
@@ -59,9 +129,9 @@ int main(int argc, char** argv) {
   if (store_path.empty()) store_path = "velsigil-license.json";
   options.store = std::make_shared<velsigil::FileStore>(store_path);
 
-  velsigil::Client client(api_url, kProductId, kPublicKey, options);
+  velsigil::Client client(api_url, product_id, public_key, options);
   if (!client.is_configured()) {
-    std::cerr << "configuration error: " << client.configuration_error() << '\n';
+    std::cerr << "configuration error: " << client.configuration_error() << '\n' << kUsage;
     return 2;
   }
 

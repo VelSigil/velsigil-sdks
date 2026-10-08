@@ -8,6 +8,14 @@ Everything here follows SPEC section 10:
   parsed, so no JSON canonicalisation is involved.
 * Only the public key handed to the client is trusted. The envelope ``kid``
   is informational and never used to pick a key.
+* The two public keys of the shared SDK test vectors are refused: their
+  private keys are published in ``test-vectors.json``. The public helpers
+  here have no server URL, so they refuse them unconditionally
+  (:class:`ConfigurationError`, as for an invalid key); only
+  :class:`~velsigil_client.VelsigilClient` allows them, for a loopback
+  ``api_url``. The client and the SDK's own vector tests use the internal,
+  unguarded equivalents (``_new_verifier``, ``_open_envelope``,
+  ``_verify_lease``), which are not part of the public API.
 
 No custom cryptography: verification is delegated to ``cryptography``
 (preferred) or ``PyNaCl`` (fallback).
@@ -35,6 +43,43 @@ MAX_SIGNED_DATA_LENGTH = 1024 * 1024
 _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]*={0,2}\Z")
 _B64STD_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}\Z")
 _HEX64_RE = re.compile(r"^[0-9A-Fa-f]{64}\Z")
+
+#: Message of every refusal of a published test key (the client constructor and the public helpers here).
+_PUBLISHED_TEST_KEY_MESSAGE = (
+    "This is the public test key from the Velsigil SDK test vectors, whose private key is published: "
+    "anyone could forge license answers for it. Use your product's public key "
+    "(panel: Products > your product > Integration)."
+)
+
+
+def _is_published_test_key(raw: Any) -> bool:
+    """``True`` if ``raw`` (decoded key bytes) is one of the published test keys.
+
+    The decoded bytes are compared, so no other spelling of a test key (no
+    padding, whitespace, non-canonical base64) gets through.
+    """
+    # The key set is defined in client.py, the one module of this SDK that holds the published keys (the SDK
+    # repository's CI allows them only there). Imported here at call time because client.py imports this module;
+    # importing the package always loads client.py first, so this is a plain lookup.
+    from .client import _PUBLISHED_TEST_PUBLIC_KEYS
+
+    return isinstance(raw, (bytes, bytearray)) and bytes(raw) in _PUBLISHED_TEST_PUBLIC_KEYS
+
+
+def _refuse_published_test_key(raw: Any) -> None:
+    """Raise :class:`ConfigurationError` (as for an invalid key) for a published test key."""
+    if _is_published_test_key(raw):
+        raise ConfigurationError(_PUBLISHED_TEST_KEY_MESSAGE)
+
+
+def _refuse_test_key_verifier(verifier: Any) -> None:
+    """Refuse a verifier whose public key is a published test key.
+
+    A public :class:`Ed25519Verifier` never holds one; this catches the
+    client's internal verifier (loopback ``api_url``) or one built with
+    ``_new_verifier`` being passed to the public helpers.
+    """
+    _refuse_published_test_key(getattr(verifier, "public_key_bytes", None))
 
 
 # --------------------------------------------------------------------------- #
@@ -69,8 +114,17 @@ def decode_public_key(public_key_base64: str) -> bytes:
     """Decode the product public key (standard base64 of the raw 32-byte key).
 
     Missing padding and surrounding whitespace are tolerated; anything else
-    raises :class:`ConfigurationError`.
+    raises :class:`ConfigurationError`. The two public keys of the SDK test
+    vectors are refused with :class:`ConfigurationError` too: their private
+    keys are published.
     """
+    raw = _decode_public_key(public_key_base64)
+    _refuse_published_test_key(raw)
+    return raw
+
+
+def _decode_public_key(public_key_base64: str) -> bytes:
+    """Internal: :func:`decode_public_key` without the published-test-key refusal."""
     if not isinstance(public_key_base64, str):
         raise ConfigurationError("public_key must be a base64 string")
     text = public_key_base64.strip().rstrip("=")
@@ -86,7 +140,11 @@ def decode_public_key(public_key_base64: str) -> bytes:
 
 
 def key_id_for(public_key_base64: str) -> str:
-    """Return the key id (first 16 hex chars of SHA-256 of the raw key)."""
+    """Return the key id (first 16 hex chars of SHA-256 of the raw key).
+
+    Raises :class:`ConfigurationError` for an invalid key and for the two
+    public keys of the SDK test vectors (:func:`decode_public_key`).
+    """
     return hashlib.sha256(decode_public_key(public_key_base64)).hexdigest()[:16]
 
 
@@ -142,12 +200,18 @@ class Ed25519Verifier:
 
     ``backend`` may be ``"auto"`` (default: ``cryptography``, then ``PyNaCl``),
     ``"cryptography"`` or ``"nacl"``.
+
+    Raises :class:`ConfigurationError` for an invalid key and for the two
+    public keys of the SDK test vectors, whose private keys are published
+    (there is no server URL here, so they are refused unconditionally).
     """
 
     __slots__ = ("_verify", "_raw", "backend")
 
     def __init__(self, public_key_base64: str, backend: str = "auto") -> None:
-        raw = decode_public_key(public_key_base64)
+        self._setup(decode_public_key(public_key_base64), backend)
+
+    def _setup(self, raw: bytes, backend: str) -> None:
         factories = []
         if backend in ("auto", "cryptography"):
             factories.append(("cryptography", _cryptography_verifier))
@@ -186,6 +250,18 @@ class Ed25519Verifier:
 
     def __repr__(self) -> str:
         return "Ed25519Verifier(key_id=%r, backend=%r)" % (self.key_id, self.backend)
+
+
+def _new_verifier(public_key_base64: str, backend: str = "auto") -> Ed25519Verifier:
+    """Internal: an :class:`Ed25519Verifier` that does not refuse the published test keys.
+
+    Only for :class:`~velsigil_client.VelsigilClient`, which refuses them
+    itself unless ``api_url`` is a loopback host, and for the SDK's own
+    vector tests. Not part of the public API.
+    """
+    verifier = Ed25519Verifier.__new__(Ed25519Verifier)
+    verifier._setup(_decode_public_key(public_key_base64), backend)
+    return verifier
 
 
 def _verify_ascii(verifier: Ed25519Verifier, signed_text: Any, signature_text: Any) -> bool:
@@ -261,7 +337,25 @@ def open_envelope(
     Raises :class:`EnvelopeError` with ``reason`` ``invalid_signature``,
     ``malformed``, ``nonce_mismatch``, ``product_mismatch``,
     ``type_mismatch`` or ``hwid_mismatch``.
+
+    A ``verifier`` whose public key is one of the two public keys of the SDK
+    test vectors (private keys published) raises :class:`ConfigurationError`,
+    as :class:`Ed25519Verifier` does for such a key, before anything else is
+    checked.
     """
+    _refuse_test_key_verifier(verifier)
+    return _open_envelope(verifier, envelope, expected_nonce, expected_product_id, expected_type, expected_hwid)
+
+
+def _open_envelope(
+    verifier: Ed25519Verifier,
+    envelope: Any,
+    expected_nonce: str,
+    expected_product_id: str,
+    expected_type: str,
+    expected_hwid: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Internal: :func:`open_envelope` without the published-test-key refusal."""
     # A programming error, not a verdict on the response: the type check must never be skipped.
     if not isinstance(expected_type, str) or not expected_type:
         raise ValueError("expected_type must be the request type (validate, deactivate, update_check, download or trial)")
@@ -315,7 +409,7 @@ def _check_device_binding(
     if isinstance(lease, Mapping) and isinstance(lease.get("token"), str):
         server_time = as_int(payload.get("serverTime"))
         try:
-            verify_lease(verifier, lease["token"], product_id, hwid, server_time if server_time is not None else 0)
+            _verify_lease(verifier, lease["token"], product_id, hwid, server_time if server_time is not None else 0)
         except LeaseError as exc:
             if exc.reason == LeaseError.HWID_MISMATCH:
                 raise EnvelopeError(
@@ -349,7 +443,24 @@ def verify_lease(
     Raises :class:`LeaseError` with ``reason`` ``malformed``,
     ``invalid_signature``, ``product_mismatch``, ``hwid_mismatch`` or
     ``expired``.
+
+    A ``verifier`` whose public key is one of the two public keys of the SDK
+    test vectors (private keys published) raises :class:`ConfigurationError`,
+    as :class:`Ed25519Verifier` does for such a key, before the token is
+    looked at.
     """
+    _refuse_test_key_verifier(verifier)
+    return _verify_lease(verifier, token, product_id, hwid, now)
+
+
+def _verify_lease(
+    verifier: Ed25519Verifier,
+    token: Any,
+    product_id: str,
+    hwid: str,
+    now: float,
+) -> Dict[str, Any]:
+    """Internal: :func:`verify_lease` without the published-test-key refusal."""
     if not isinstance(token, str) or len(token) > MAX_SIGNED_DATA_LENGTH:
         raise LeaseError(LeaseError.MALFORMED, "lease token is not a string")
     parts = token.split(".")

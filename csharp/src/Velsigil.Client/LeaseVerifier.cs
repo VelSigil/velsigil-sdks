@@ -72,12 +72,28 @@ public static class LeaseVerifier
     /// <param name="productId">The product id the lease must belong to.</param>
     /// <param name="hwid">The raw hardware id of this machine (the SDK hashes it).</param>
     /// <param name="now">The current time.</param>
-    /// <exception cref="ArgumentException">The public key is invalid.</exception>
+    /// <exception cref="ArgumentException">
+    /// The public key is invalid, or it is one of the public keys of the SDK test vectors. Their private keys are
+    /// published, so anyone could sign a lease for them; this helper has no server URL, so (unlike the
+    /// <see cref="VelsigilClient"/> constructor) it refuses them for every caller.
+    /// </exception>
     public static LeaseVerification Verify(string? token, string publicKeyBase64, string productId, string hwid, DateTimeOffset now)
     {
         var key = Ed25519Verifier.FromBase64(publicKeyBase64);
-        return Verify(token, key, productId ?? string.Empty, hwid ?? string.Empty, now.ToUnixTimeSeconds());
+        if (key.IsPublishedTestKey)
+        {
+            // The exception type and parameter of an invalid key, with the client constructor's refusal message.
+            throw new ArgumentException(PublishedTestKeys.RefusalMessage, nameof(publicKeyBase64));
+        }
+        return Verify(token, key, productId, hwid, now);
     }
+
+    /// <summary>
+    /// Not part of the public API: verifies with an already decoded key and does not refuse the published test keys.
+    /// Used by the SDK's own vector tests; <see cref="VelsigilClient"/> checks its key in its constructor (loopback rule).
+    /// </summary>
+    internal static LeaseVerification Verify(string? token, Ed25519Verifier key, string? productId, string? hwid, DateTimeOffset now) =>
+        Verify(token, key, productId ?? string.Empty, hwid ?? string.Empty, now.ToUnixTimeSeconds());
 
     internal static LeaseVerification Verify(string? token, Ed25519Verifier key, string productId, string hwid, long nowUnix)
     {

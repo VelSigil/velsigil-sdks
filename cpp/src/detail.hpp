@@ -109,12 +109,29 @@ DownloadOutcome http_download(const std::string& url, const std::filesystem::pat
 
 // ---- client.cpp ---------------------------------------------------------------------------------
 
+/// True for the loopback hosts localhost, 127.0.0.1 and [::1] (ASCII case-insensitive; `host` without a
+/// port, an IPv6 literal with its brackets). The one loopback rule of the SDK: url_policy_error allows plain
+/// http:// for these hosts, and the Client accepts the published test-vector keys only for them.
+bool is_loopback_host(std::string_view host) noexcept;
 /// Returns an error message when `url` violates the transport policy: absolute http(s) URL, no
-/// credentials or whitespace, and https unless the host is localhost / 127.0.0.1 / [::1] or
-/// `allow_insecure_http` is set.
+/// credentials or whitespace, and https unless the host is_loopback_host() or `allow_insecure_http` is set.
 std::optional<std::string> url_policy_error(std::string_view url, bool allow_insecure_http);
+/// True when `url` is an absolute URL (parsed exactly as url_policy_error parses it) whose host
+/// is_loopback_host(), whatever its scheme.
+bool is_loopback_url(std::string_view url);
 /// Current unix time in seconds from the system clock.
 std::int64_t system_unix_time() noexcept;
+
+/// velsigil::verify_envelope_typed and velsigil::verify_lease WITHOUT their refusal of the published
+/// test-vector keys (test-vectors.json keys.publicKey / keys.wrongPublicKey, whose private seeds are
+/// public). The public helpers refuse those keys always (they have no API URL that could name a local test
+/// server); these internal entry points exist only so that the SDK's own tests can verify the shared vectors,
+/// which are signed with them. Never call them from production code.
+EnvelopeVerification verify_envelope_typed_unguarded(std::string_view envelope_json, std::string_view public_key_base64,
+                                                     std::string_view expected_nonce, std::string_view expected_product_id,
+                                                     std::string_view expected_type, std::string_view expected_hwid) noexcept;
+LeaseVerification verify_lease_unguarded(std::string_view token, std::string_view public_key_base64,
+                                         std::string_view product_id, std::string_view hwid, std::int64_t now_unix) noexcept;
 
 }  // namespace velsigil::detail
 

@@ -9,7 +9,7 @@ import {
   isUnixTime,
   sameId,
 } from './guards.js';
-import { resolvePublicKey, verifySignature } from './signature.js';
+import { refusePublishedTestKey, resolvePublicKey, verifySignature } from './signature.js';
 import type { LeasePayload } from './types.js';
 
 const MAX_TOKEN_LENGTH = 16 * 1024;
@@ -44,13 +44,33 @@ export interface LeaseExpectations {
  * The signature over the ASCII bytes of the first segment is checked with ONLY the given public key
  * before the payload is decoded. Afterwards: `typ === 'lease'`, matching productId, matching
  * `hwidHash = sha256(hwid)`, and `now < exp`. A lease never outlives the license itself.
+ *
+ * Throws `VelsigilError('invalid_public_key')` for an invalid key or one of the public test keys of the SDK
+ * test vectors, whose private keys are published (this helper has no API URL, so unlike the client
+ * constructor it refuses them for local servers too).
  */
 export function verifyLease(
   publicKey: string | KeyObject,
   token: unknown,
   expected: LeaseExpectations,
 ): LeaseVerification {
-  const key = resolvePublicKey(publicKey);
+  return verifyLeaseWith(refusePublishedTestKey(resolvePublicKey(publicKey)), token, expected);
+}
+
+/**
+ * Internal (not exported from the package): {@link verifyLease} without the published-test-key refusal. For
+ * `VelsigilClient`, whose constructor already refused those keys outside loopback hosts, for `verifyEnvelope`'s
+ * device-binding check (its key is already checked), and for the SDK's own vector tests.
+ */
+export function verifyLeaseAllowingTestKeys(
+  publicKey: string | KeyObject,
+  token: unknown,
+  expected: LeaseExpectations,
+): LeaseVerification {
+  return verifyLeaseWith(resolvePublicKey(publicKey), token, expected);
+}
+
+function verifyLeaseWith(key: KeyObject, token: unknown, expected: LeaseExpectations): LeaseVerification {
   if (typeof token !== 'string' || token.length === 0 || token.length > MAX_TOKEN_LENGTH) {
     return { status: 'malformed', reason: 'Lease token is missing or too long' };
   }
