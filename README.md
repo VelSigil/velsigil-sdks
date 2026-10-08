@@ -152,7 +152,7 @@ tag on `main` and published through OIDC trusted publishing (no registry tokens 
 |---|---|
 | npm | `npm audit signatures` (registry signatures and provenance of your installed tree); the package page shows the provenance linking to this repository and `release.yml` |
 | PyPI | `pypi-attestations verify pypi --repository https://github.com/VelSigil/velsigil-sdks pypi:velsigil_client-<version>-py3-none-any.whl` (PEP 740 attestations); install with `pip install --require-hashes` |
-| NuGet | owner `velsigil-client` on nuget.org (plus the reserved-prefix checkmark next to `Velsigil.Client` once nuget.org grants it); `dotnet nuget verify --all <package>.nupkg` (repository signature); lock files + `--locked-mode`; package source mapping `Velsigil.*` to nuget.org |
+| NuGet | the reserved-prefix checkmark next to `Velsigil.Client` on nuget.org (owner `velsigil-client`); `dotnet nuget verify --all <package>.nupkg` (repository signature); lock files + `--locked-mode`; package source mapping `Velsigil.*` to nuget.org |
 | C++ | `gh attestation verify velsigil-cpp-<version>.tar.gz --repo VelSigil/velsigil-sdks --signer-workflow VelSigil/velsigil-sdks/.github/workflows/release.yml --source-ref refs/tags/v<version> --deny-self-hosted-runners` and `gh release verify-asset v<version> velsigil-cpp-<version>.tar.gz --repo VelSigil/velsigil-sdks` (immutable release) |
 
 Step-by-step instructions, including lock-file and CI settings for your own project: [docs/VERIFYING.md](docs/VERIFYING.md).

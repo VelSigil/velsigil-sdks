@@ -44,9 +44,9 @@ the fresh nonce of the request and name your product. Unsigned or tampered respo
 dotnet add package Velsigil.Client
 ```
 
-The official package is owned by the nuget.org account `velsigil-client`. Velsigil has asked nuget.org to reserve the
-`Velsigil.` package-id prefix; once it is reserved, the official package shows the verified checkmark and no one else
-can publish a `Velsigil.*` package. For a locked, source-mapped restore and signature checks see
+The official package is owned by the nuget.org account `velsigil-client`, which holds the reserved `Velsigil.`
+package-id prefix: the official package shows the verified checkmark, and no one else can publish a `Velsigil.*`
+package. For a locked, source-mapped restore and signature checks see
 [VERIFYING.md](https://github.com/VelSigil/velsigil-sdks/blob/main/docs/VERIFYING.md).
 
 ### Option B: local NuGet feed built from source

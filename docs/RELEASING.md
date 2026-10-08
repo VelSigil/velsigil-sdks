@@ -71,6 +71,8 @@ so the very first version is published by hand once. It is a release candidate o
 
 ### 1.2 nuget.org: reserve the `Velsigil.` prefix
 
+**Done:** nuget.org approved the reservation on 2026-10-08. The text below is kept for a future prefix.
+
 E-mail account@nuget.org (CC support@nuget.org) **from the e-mail address registered on the nuget.org account**
 `velsigil-client` (staff ask for that address), and ask them to reserve the ID prefix **`Velsigil.*`** for that
 account. The e-mail must name the owner account and the prefix; also say it is a normal (private, not public)
@@ -224,7 +226,7 @@ first upload). As of 2026-10-07 you are still waiting for an approval on PyPI (s
 
    An unexpected staged version (one you did not start): `npm stage reject <stage-id>` and see section 8.
 6. **Check the result**: `npm view velsigil-client@X.Y.Z dist.attestations`; the provenance and attestation panels on
-   npmjs.com and pypi.org; the checkmark on nuget.org (once the prefix is reserved); `gh release verify vX.Y.Z --repo
+   npmjs.com and pypi.org; the reserved-prefix checkmark on nuget.org; `gh release verify vX.Y.Z --repo
    VelSigil/velsigil-sdks`. [VERIFYING.md](VERIFYING.md) has the commands sellers use.
 7. **After `1.0.0` only**: retire the bootstrap version (`latest` already points to `1.0.0` after the approval):
 

@@ -76,9 +76,8 @@ Replace `X.Y.Z` with the version you use. The commands use the repository name e
 
 ## .NET (nuget.org `Velsigil.Client`)
 
-1. Check the owner of `Velsigil.Client` on nuget.org: it is `velsigil-client`. Once nuget.org grants Velsigil's
-   request to reserve the `Velsigil.` prefix for that account, the package also shows the **verified checkmark** and
-   no one else can publish a package whose ID starts with it.
+1. Check the **verified checkmark** next to `Velsigil.Client` on nuget.org and that its owner is `velsigil-client`:
+   the `Velsigil.` prefix is reserved for that account, so no one else can publish a package whose ID starts with it.
 2. Lock and source-map your restore (in your application's repository):
 
    ```xml
