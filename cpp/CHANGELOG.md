@@ -1,5 +1,36 @@
 # Changelog - Velsigil C++ SDK (`velsigil`)
 
+## 1.0.3 (2026-10-08)
+
+### Fixed
+
+- `validate_with_offline_fallback()` now uses the stored offline lease whenever the license server is unavailable,
+  not only on `network_error`: also on every **unsigned HTTP 5xx**, whatever its body (a Velsigil error such as
+  `500 internal_error` or `503 service_busy`, HTML, empty or garbled). Before, an application whose license server
+  was up while its database was down got `internal_error` and stopped working although it held a valid lease; so
+  did one behind a proxy that answered a 500, or a 502/503/504 with a Velsigil error body. Only the HTTP status
+  decides (whoever can inject an unsigned 5xx can as well drop the connection, which already allowed the fallback;
+  the lease is signed, device-bound and time-limited). Signed answers (`license_revoked`, ...), 4xx answers
+  (`429 rate_limited`, `400 validation_error`, ...) and `invalid_response` stay final. Without a stored lease the
+  online error is returned as before (for an unusable stored lease see "Changed" below). `validate()` is unchanged
+  and still reports the real error; the unsigned-error mapping (`internal_error` / `network_error`) is unchanged
+  too, and no result code was added. Earlier 1.0.x versions already fell back on an empty (or HTML)
+  502/503/504.
+
+### Changed
+
+- `validate_with_offline_fallback()` now follows the fallback rule binding for all Velsigil SDKs
+  (`docs/CLIENT_PROTOCOL.md` section 9), as the Node and .NET SDKs already do: when the server is unavailable and
+  the stored lease cannot be used, the result is that of `validate_offline()`, `lease_expired` or `lease_invalid`
+  (with `offline == true`), instead of the online `network_error` / `internal_error` with the lease problem
+  appended to its message. The stored lease is kept exactly as by `validate_offline()` (an expired or invalid lease
+  is not removed). Only when no lease is stored is the original online result returned, unchanged and without an
+  appended reason (not `no_lease`). A usable lease still gives `ok` with `offline == true`, now also with
+  `validate_offline()`'s own message (before: "The license server is unreachable; validated with the stored offline
+  lease."), and `validate()` is unchanged. An application that tested the fallback result for `network_error` to
+  show a "cannot reach the license server" message should also treat `lease_expired` / `lease_invalid` (with
+  `offline == true`) as "connect to renew the license".
+
 ## 1.0.2 (2026-10-08)
 
 ### Security

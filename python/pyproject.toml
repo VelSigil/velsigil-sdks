@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "velsigil-client"
-version = "1.0.2"
+version = "1.0.3"
 description = "Official Python client for the Velsigil license server (Ed25519-verified license validation, offline leases, updates)."
 readme = "README.md"
 # 3.10 is the oldest CPython the cryptography floor below still ships wheels for that is not long past its end of

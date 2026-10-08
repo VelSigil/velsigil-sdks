@@ -104,6 +104,14 @@ internal static class Responses
     public static HttpResponseMessage Text(int status, string text, string mediaType = "text/html") =>
         new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent(text, Encoding.UTF8, mediaType) };
 
+    /// <summary>A response with an empty body (<c>Content-Length: 0</c>, no content type).</summary>
+    public static HttpResponseMessage Empty(int status, params (string Name, string Value)[] headers)
+    {
+        var response = new HttpResponseMessage((HttpStatusCode)status) { Content = new ByteArrayContent(Array.Empty<byte>()) };
+        foreach (var (name, value) in headers) response.Headers.TryAddWithoutValidation(name, value);
+        return response;
+    }
+
     public static HttpResponseMessage Signed(JsonObject payload, TestSigner? signer = null) =>
         Json(200, (signer ?? TestSigner.Primary).Envelope(payload));
 

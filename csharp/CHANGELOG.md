@@ -1,5 +1,22 @@
 # Changelog - Velsigil .NET SDK (`Velsigil.Client`)
 
+## 1.0.3 (2026-10-08)
+
+### Fixed
+
+- `ValidateWithOfflineFallbackAsync` now also falls back to the stored offline lease when the license server is
+  up but cannot answer: every **unsigned HTTP 5xx** answer (500, 502, 503, 504 and any other 5xx), whatever its
+  body (a Velsigil error body, a reverse proxy's HTML page, an empty or garbled body). Before, it fell back only on
+  `network_error` (no response, or a gateway 502/503/504 without a Velsigil error body), so a self-hosted server
+  whose database was down answered 500 / 503 `internal_error` and the app failed although it held a valid lease.
+  The HTTP status decides, not the code: signed answers (revoked, expired, banned, ...), 4xx answers (`rate_limited`,
+  `validation_error`, ..., even one whose body says `internal_error`) and `invalid_response` stay final. Without a
+  stored lease the original result (`internal_error` or `network_error`, with its `HttpStatus` and `RequestId`) is
+  returned; an expired or invalid lease gives `lease_expired` / `lease_invalid`, as for `network_error`.
+  `ValidateAsync` and the result codes are unchanged (no new code): it still reports `internal_error` for these
+  answers. Falling back on an unsigned 5xx is as safe as on a dropped connection, which an attacker can cause
+  just as easily; the lease is signed, bound to the device and time-limited.
+
 ## 1.0.2 (2026-10-08)
 
 ### Security

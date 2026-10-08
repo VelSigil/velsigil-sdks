@@ -36,7 +36,7 @@ namespace Velsigil.Client;
 public sealed class VelsigilClient : IDisposable
 {
     /// <summary>SDK version, sent in the User-Agent header.</summary>
-    public const string SdkVersion = "1.0.2";
+    public const string SdkVersion = "1.0.3";
 
     private const string TypeValidate = "validate";
     private const string TypeDeactivate = "deactivate";
@@ -333,18 +333,26 @@ public sealed class VelsigilClient : IDisposable
     }
 
     /// <summary>
-    /// Validates online and, <b>only</b> when the server is unreachable (<see cref="ResultCodes.NetworkError"/>),
-    /// falls back to the stored offline lease. Any server answer (including failures and invalid
-    /// responses) is returned as is. When no lease is stored, the original <see cref="ResultCodes.NetworkError"/>
-    /// result is returned (as in every Velsigil SDK). Check <see cref="VelsigilResult.Offline"/> to know which
-    /// path was used.
+    /// Validates online and, <b>only</b> when the license server is unavailable, falls back to the stored offline
+    /// lease. Unavailable means: no HTTP response at all (<see cref="ResultCodes.NetworkError"/>: DNS, connection, TLS,
+    /// reset, timeout), or an <b>unsigned HTTP 5xx</b> answer whatever its body (a Velsigil error body, an HTML page of
+    /// a reverse proxy, an empty or garbled body): <see cref="ResultCodes.InternalError"/>, or
+    /// <see cref="ResultCodes.NetworkError"/> for a gateway 502/503/504 without a Velsigil error body. That covers a
+    /// server whose database is down and a proxy whose app is down. Every other answer is returned as is: signed
+    /// answers (revoked, expired, banned, ...), 4xx answers (<see cref="ResultCodes.RateLimited"/>,
+    /// <see cref="ResultCodes.ValidationError"/>, ...) and <see cref="ResultCodes.InvalidResponse"/>. When no lease is
+    /// stored, the original online result (<see cref="ResultCodes.NetworkError"/> or
+    /// <see cref="ResultCodes.InternalError"/>) is returned (as in every Velsigil SDK); a stored lease that is unusable
+    /// gives <see cref="ResultCodes.LeaseExpired"/> or <see cref="ResultCodes.LeaseInvalid"/>. Check
+    /// <see cref="VelsigilResult.Offline"/> to know which path was used. <see cref="ValidateAsync"/> itself never falls
+    /// back and always reports the real error.
     /// </summary>
     public async Task<VelsigilResult> ValidateWithOfflineFallbackAsync(string licenseKey, ValidateOptions? options = null, CancellationToken cancellationToken = default)
     {
         var online = await ValidateAsync(licenseKey, options, cancellationToken).ConfigureAwait(false);
-        if (!string.Equals(online.Code, ResultCodes.NetworkError, StringComparison.Ordinal)) return online;
+        if (!IsServerUnavailable(online)) return online;
         var offline = ValidateOffline();
-        // Without any stored lease the network failure is the more useful answer.
+        // Without any stored lease the online failure is the more useful answer.
         return string.Equals(offline.Code, ResultCodes.NoLease, StringComparison.Ordinal) ? online : offline;
     }
 
@@ -827,6 +835,22 @@ public sealed class VelsigilClient : IDisposable
             default:
                 return "The response is malformed.";
         }
+    }
+
+    /// <summary>
+    /// The offline-fallback rule (<see cref="ValidateWithOfflineFallbackAsync"/>): true when <paramref name="online"/> is
+    /// no decision of the license server. That is <see cref="ResultCodes.NetworkError"/> (no HTTP response, or a gateway
+    /// 502/503/504 without a Velsigil error body) or any unsigned answer with an HTTP 5xx status, whatever its body and
+    /// the code it maps to. The status decides, not the code: a 4xx carrying <c>internal_error</c> stays final. Safe
+    /// because an attacker who can inject an unsigned 5xx can as well drop the connection, which falls back anyway, and
+    /// the lease itself is signed, bound to this device and time-limited. Signed answers and
+    /// <see cref="ResultCodes.InvalidResponse"/> (always reported with status 200) are final.
+    /// </summary>
+    private static bool IsServerUnavailable(VelsigilResult online)
+    {
+        if (online.Ok || online.Verified || online.Offline) return false;
+        if (string.Equals(online.Code, ResultCodes.NetworkError, StringComparison.Ordinal)) return true;
+        return online.HttpStatus is int status && status >= 500 && status <= 599;
     }
 
     private static bool IsTransportException(Exception ex) =>

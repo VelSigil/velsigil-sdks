@@ -118,7 +118,12 @@ public static class ResultCodes
     /// <summary>Too many requests (HTTP 429); see <see cref="VelsigilResult.RetryAfter"/>.</summary>
     public const string RateLimited = "rate_limited";
 
-    /// <summary>The server failed (HTTP 500).</summary>
+    /// <summary>
+    /// The server failed or is temporarily unavailable: an unsigned HTTP 5xx answer (500, or 502/503/504 with a
+    /// Velsigil error body, e.g. while the server's database is down). With an HTTP 5xx status it triggers the
+    /// offline fallback of <see cref="VelsigilClient.ValidateWithOfflineFallbackAsync"/>, like
+    /// <see cref="NetworkError"/>; retry later.
+    /// </summary>
     public const string InternalError = "internal_error";
 
     /// <summary>The request body was too large (HTTP 413).</summary>
@@ -138,7 +143,9 @@ public static class ResultCodes
 
     /// <summary>
     /// The server could not be reached (DNS, connection, TLS, timeout), or a gateway answered 502/503/504
-    /// without a Velsigil error body. The only code that triggers the offline fallback.
+    /// without a Velsigil error body (an HTML page, an empty body). Triggers the offline fallback of
+    /// <see cref="VelsigilClient.ValidateWithOfflineFallbackAsync"/>, as does every other unsigned HTTP 5xx answer
+    /// (<see cref="InternalError"/>).
     /// </summary>
     public const string NetworkError = "network_error";
 

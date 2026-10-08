@@ -66,6 +66,9 @@ FRIENDLY = {
     Code.DEVICE_VERIFICATION_FAILED: "This device could not be verified. Reset your devices in the customer portal.",
     Code.OUTDATED_VERSION: "This version is no longer supported. Please update.",
     Code.NETWORK_ERROR: "The license server could not be reached and no offline license is available.",
+    Code.INTERNAL_ERROR: "The license server is temporarily unavailable and no offline license is available.",
+    Code.LEASE_EXPIRED: "The license server could not be reached and the offline license has expired.",
+    Code.LEASE_INVALID: "The license server could not be reached and the stored offline license is not valid here.",
     Code.RATE_LIMITED: "Too many attempts. Please wait a moment and try again.",
 }
 

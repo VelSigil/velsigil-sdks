@@ -1,5 +1,18 @@
 # Changelog - Velsigil Node.js SDK (`velsigil-client`)
 
+## 1.0.3 (2026-10-08)
+
+### Fixed
+
+- `validateWithOfflineFallback` now also falls back to the stored offline lease when the license server is
+  **unavailable** but still answers HTTP: any unsigned HTTP 5xx (500-599), whatever its body (a Velsigil error body,
+  a gateway's HTML page, an empty, non-JSON or oversized body). Until now only `network_error` fell back, so while a
+  self-hosted panel was up with its database down (500 `internal_error`, 503 `service_busy`), apps with a valid
+  lease stopped working. 502/503/504 without a Velsigil error body already fell back (`network_error`). Signed
+  answers, 4xx (`rate_limited`, `validation_error`, …), redirects and `invalid_response` stay final. Without a
+  usable lease the result is unchanged: `lease_expired` / `lease_invalid`, or the original online result
+  (`internal_error`, `network_error`, …). Plain `validate()` and the result codes are unchanged; no new code.
+
 ## 1.0.2 (2026-10-08)
 
 ### Security

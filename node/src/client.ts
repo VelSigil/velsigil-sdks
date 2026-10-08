@@ -99,6 +99,22 @@ const STORE_UNAVAILABLE_MESSAGE =
 interface Exchange {
   result: VelsigilResult;
   payload: ResponsePayload | null;
+  /**
+   * The server could not answer: no HTTP response at all, or an unsigned HTTP 5xx (see {@link isServerErrorStatus}).
+   * Decides the offline fallback of {@link VelsigilClient.validateWithOfflineFallback}; the result's code is unchanged.
+   */
+  unavailable: boolean;
+}
+
+/** {@link VelsigilClient.validate}'s result plus whether the server was unavailable (see {@link Exchange}). */
+interface OnlineValidation {
+  result: VelsigilResult;
+  unavailable: boolean;
+}
+
+/** A local input error of validate (no request sent): never "server unavailable". */
+function localValidationFailure(message: string): OnlineValidation {
+  return { result: localFailure('validation_error', message, 'validate'), unavailable: false };
 }
 
 /**
@@ -234,26 +250,8 @@ export class VelsigilClient {
    * Validates (and on first use activates) the license on this device. Persists a newly issued
    * device secret and the offline lease. Never throws.
    */
-  validate(licenseKey: string, options: ValidateOptions = {}): Promise<VelsigilResult> {
-    return this.#deviceLock.run(async () => {
-      const key = normalizeKey(licenseKey);
-      if (key === null) return localFailure('validation_error', 'License key is missing or too long.', 'validate');
-      const version = optionalText(options?.version, MAX_VERSION_LENGTH);
-      const deviceName = optionalText(options?.deviceName, MAX_DEVICE_NAME_LENGTH);
-      if (version === null) return localFailure('validation_error', 'version is too long.', 'validate');
-      if (deviceName === null) return localFailure('validation_error', 'deviceName is too long.', 'validate');
-
-      const loaded = await this.#loadState();
-      const { result, payload } = await this.#exchange('validate', 'validate', {
-        licenseKey: key,
-        hwid: this.hardwareId,
-        deviceSecret: loaded.state.deviceSecret ?? undefined,
-        deviceName,
-        version,
-      });
-      if (payload !== null) await this.#applyPayload(loaded, payload);
-      return result;
-    });
+  async validate(licenseKey: string, options: ValidateOptions = {}): Promise<VelsigilResult> {
+    return (await this.#validateOnline(licenseKey, options)).result;
   }
 
   /**
@@ -397,15 +395,25 @@ export class VelsigilClient {
   }
 
   /**
-   * Online validation first; ONLY when the server cannot be reached (`network_error`) the stored
-   * offline lease is used. Any answer from the server (including denials) is returned as is.
+   * Online validation first; when the server is unavailable, the stored offline lease is used instead
+   * ({@link validateOffline}). "Unavailable" means:
+   * - no HTTP response at all (`network_error`: DNS, connect, TLS, timeout, connection reset), or
+   * - an unsigned HTTP 5xx answer (500-599), whatever its body: a Velsigil error body (`internal_error`, e.g. while the
+   *   panel is up but its database is down), a gateway's HTML page (502/503/504 from IIS ARR, Caddy, nginx, ...), an
+   *   empty, non-JSON or oversized body. {@link validate} reports these as `internal_error` or `network_error`.
+   *
+   * Every other answer is final and returned as is: all signed answers (`license_revoked`, `license_expired`, device
+   * denials, ...), 4xx errors (`rate_limited`, `validation_error`, `ip_blocked`, `unknown_product`, ...), redirects and
+   * `invalid_response` (for example a bad signature). When the fallback finds no usable lease, the result is
+   * `lease_expired` or `lease_invalid` for an unusable stored lease, and the original online result (`network_error`,
+   * `internal_error`, ...) when none is stored.
    */
   async validateWithOfflineFallback(licenseKey: string, options: ValidateOptions = {}): Promise<VelsigilResult> {
-    const online = await this.validate(licenseKey, options);
-    if (online.code !== 'network_error') return online;
+    const online = await this.#validateOnline(licenseKey, options);
+    if (!online.unavailable) return online.result;
     const offline = await this.validateOffline();
-    // Without any stored lease the network failure is the more useful answer.
-    return offline.code === 'no_lease' ? online : offline;
+    // Without any stored lease the original failure (network_error, internal_error, ...) is the more useful answer.
+    return offline.code === 'no_lease' ? online.result : offline;
   }
 
   /** Forgets the stored device secret and offline lease for this product. */
@@ -422,6 +430,30 @@ export class VelsigilClient {
 
   #serverNowSeconds(): number {
     return this.#localNowSeconds() + this.#clockOffset;
+  }
+
+  /** {@link validate}, also telling whether the server was unavailable (the offline fallback rule). */
+  #validateOnline(licenseKey: string, options: ValidateOptions): Promise<OnlineValidation> {
+    return this.#deviceLock.run(async () => {
+      const local = localValidationFailure;
+      const key = normalizeKey(licenseKey);
+      if (key === null) return local('License key is missing or too long.');
+      const version = optionalText(options?.version, MAX_VERSION_LENGTH);
+      const deviceName = optionalText(options?.deviceName, MAX_DEVICE_NAME_LENGTH);
+      if (version === null) return local('version is too long.');
+      if (deviceName === null) return local('deviceName is too long.');
+
+      const loaded = await this.#loadState();
+      const { result, payload, unavailable } = await this.#exchange('validate', 'validate', {
+        licenseKey: key,
+        hwid: this.hardwareId,
+        deviceSecret: loaded.state.deviceSecret ?? undefined,
+        deviceName,
+        version,
+      });
+      if (payload !== null) await this.#applyPayload(loaded, payload);
+      return { result, unavailable };
+    });
   }
 
   /**
@@ -471,17 +503,27 @@ export class VelsigilClient {
           outcome.timedOut ? 'The license server did not respond in time.' : 'Could not reach the license server.',
           type,
         ),
+        unavailable: true,
       };
     }
     if (outcome.kind === 'too_large') {
-      return { payload: null, result: localFailure('invalid_response', 'The server response is too large.', type) };
+      return {
+        payload: null,
+        result: localFailure('invalid_response', 'The server response is too large.', type),
+        // An oversized error page on a 5xx is still an unsigned 5xx (the server is unavailable).
+        unavailable: isServerErrorStatus(outcome.status),
+      };
     }
 
     const { status, headers, body } = outcome;
     if (status === 200) {
       const json = parseJsonBytes(body);
       if (!json.ok) {
-        return { payload: null, result: localFailure('invalid_response', 'The server response is not valid JSON.', type) };
+        return {
+          payload: null,
+          result: localFailure('invalid_response', 'The server response is not valid JSON.', type),
+          unavailable: false,
+        };
       }
       const verification = verifyEnvelopeAllowingTestKeys(this.#publicKey, json.value, {
         nonce,
@@ -493,15 +535,24 @@ export class VelsigilClient {
         return {
           payload: null,
           result: localFailure('invalid_response', `Untrusted server response: ${verification.reason}.`, type),
+          unavailable: false,
         };
       }
-      return { payload: verification.payload, result: this.#resultFromPayload(verification.payload) };
+      return { payload: verification.payload, result: this.#resultFromPayload(verification.payload), unavailable: false };
     }
 
     if ((status >= 300 && status < 400) || status === 0) {
-      return { payload: null, result: localFailure('invalid_response', 'Unexpected redirect from the license server.', type) };
+      return {
+        payload: null,
+        result: localFailure('invalid_response', 'Unexpected redirect from the license server.', type),
+        unavailable: false,
+      };
     }
-    return { payload: null, result: this.#unsignedError(status, headers, body, type) };
+    return {
+      payload: null,
+      result: this.#unsignedError(status, headers, body, type),
+      unavailable: isServerErrorStatus(status),
+    };
   }
 
   /** Maps an unsigned HTTP error to a failure result. It can never produce `ok === true`. */
@@ -796,12 +847,24 @@ function codeForStatus(status: number, velsigilBody: boolean): VelsigilCode {
     case 502:
     case 503:
     case 504:
-      // Gateway/proxy failures without a Velsigil error body mean the server is unreachable, so the
-      // offline fallback applies (also for a proxy's own JSON or HTML error page).
+      // Gateway/proxy failures without a Velsigil error body mean the server is unreachable (also for a proxy's own
+      // JSON or HTML error page). The code only names the failure: the offline fallback applies to every unsigned 5xx
+      // (isServerErrorStatus), whatever code it maps to.
       return velsigilBody ? 'internal_error' : 'network_error';
     default:
       return status >= 500 ? 'internal_error' : 'invalid_response';
   }
+}
+
+/**
+ * An HTTP 5xx (500-599). Unsigned (the SDK verifies a signature only on 200), it means the server is unavailable: the
+ * Velsigil app is up but cannot answer (its database is down: 500 `internal_error`, 503 `service_busy` or an empty
+ * 503), or the gateway in front of it cannot reach it (502/503/504, often with an HTML page). Such an answer triggers
+ * the offline fallback like a failed connection. That grants an attacker nothing: whoever can inject an unsigned 5xx
+ * can just as well drop the connection, and the fallback only honours the signed, time-limited, device-bound lease.
+ */
+function isServerErrorStatus(status: number): boolean {
+  return status >= 500 && status <= 599;
 }
 
 function localFailure(code: VelsigilCode, message: string, type: RequestType | null): VelsigilResult {

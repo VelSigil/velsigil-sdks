@@ -216,7 +216,7 @@ The constructor never throws. Invalid arguments are recorded: `is_configured()` 
 | `ValidationResult check_update(const std::string& current_version)` | Latest published release in `result.update` (`no_release` when nothing is published). Sends no license data. |
 | `ValidationResult get_download(const std::string& license_key, const std::optional<std::string>& version = std::nullopt)` | Short-lived download descriptor in `result.download`. Requires an already activated device; never activates one. A grant whose URL violates the HTTPS policy (see `api_url`) is rejected as `invalid_response`, with no descriptor and nothing stored. |
 | `ValidationResult validate_offline()` | Verifies the stored offline lease without network access (`result.offline == true`). |
-| `ValidationResult validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& = {})` | Online validation first; **only** when it fails with `network_error` the stored lease is used. Signed refusals and unsigned HTTP errors are never overridden by the lease. |
+| `ValidationResult validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& = {})` | Online validation first; the stored lease is used **only** when the server is unavailable: no HTTP response (`network_error`) or an unsigned HTTP 5xx whatever its body (`internal_error`, or `network_error` for a 502/503/504 without a Velsigil error body), e.g. while the server's database is down. Signed answers (`license_revoked`, ...), 4xx answers (`rate_limited`, `validation_error`, ...) and `invalid_response` are never overridden by the lease. When it falls back, the result is that of `validate_offline()` (`offline == true`): `ok`, or `lease_expired` / `lease_invalid` for a stored lease that cannot be used; only when no lease is stored is the original online result returned. See [When the offline fallback applies](#when-the-offline-fallback-applies). |
 | `DownloadFileResult download_release(const DownloadInfo&, const std::filesystem::path& destination)` | Streams the release to a temporary file next to `destination`, verifies size and SHA-256 against the signed descriptor, then renames it into place. |
 | `void clear_local_state()` | Forgets the stored device secret and lease for this product. Waits for a device-bound call in progress to finish first. |
 | `bool is_configured() const` / `std::string configuration_error() const` | Constructor validation result. |
@@ -291,7 +291,9 @@ Exceptions and failures from a store are contained by the client (persistence is
 ### Transport
 
 `ITransport::post_json(url, body, timeout) -> HttpResponse{ transport_ok, status, body, error }`.
-`transport_ok == false` means no HTTP response arrived and maps to `network_error`. The default libcurl
+`transport_ok == false` means no HTTP response arrived and maps to `network_error`. A custom transport reports
+every HTTP answer, 5xx included, with `transport_ok == true` and the real status; an unsigned 5xx then triggers the
+offline fallback just like `transport_ok == false`. The default libcurl
 transport keeps TLS peer and host verification on, never follows redirects, allows only `http`/`https`,
 caps response bodies at 1 MiB, uses `CURLOPT_NOSIGNAL` and initialises libcurl once
 (`curl_global_init` via `std::call_once`; it is never cleaned up). A custom transport receives the
@@ -358,11 +360,11 @@ spoofable and is not a security boundary; the server-issued device secret and se
 | `unknown_product` | unsigned 404 | Wrong product id or server URL. |
 | `payload_too_large` / `unsupported_media_type` | unsigned 413/415 | Request rejected. |
 | `rate_limited` | unsigned 429 | Too many requests; retry later with backoff. |
-| `internal_error` | unsigned 5xx | Server error (also 502/503/504 **with** a Velsigil error body). |
-| `network_error` | SDK | No HTTP response (DNS, connect, TLS, timeout) or a 502/503/504 gateway response without a Velsigil error body. The only code that triggers the offline fallback. |
+| `internal_error` | unsigned 5xx | Server error (also 502/503/504 **with** a Velsigil error body, e.g. `503 service_busy` while the database is busy or unreachable). From an HTTP 5xx it triggers the offline fallback. |
+| `network_error` | SDK | No HTTP response (DNS, connect, TLS, timeout) or a 502/503/504 gateway response without a Velsigil error body (an empty or HTML body). Always triggers the offline fallback. |
 | `invalid_response` | SDK | Unsigned, tampered, mismatched (nonce, product, `type` vs. endpoint, or a signed lease / `activation.hwidHash` of another device: the request was rewritten in transit and nothing from the response is stored) or malformed response, or a download grant whose URL violates the HTTPS policy. Never trust it. |
 | `invalid_configuration` | SDK | Constructor arguments rejected; see `configuration_error()`. |
-| `no_lease` / `lease_expired` / `lease_invalid` | SDK (offline) | No stored lease / lease past `exp` / signature, product or device check failed. |
+| `no_lease` / `lease_expired` / `lease_invalid` | SDK (offline) | No stored lease / lease past `exp` / signature, product or device check failed. `validate_with_offline_fallback()` returns `lease_expired` / `lease_invalid` when it falls back to an unusable stored lease, never `no_lease` (it returns the online error instead). |
 | `download_failed` / `integrity_mismatch` / `io_error` | SDK (`download_release`) | Non-200 status (an expired link answers 410) or URL rejected by the HTTPS policy / size or SHA-256 mismatch / destination not writable. |
 | `panel_too_old` | SDK (`start_trial`) | The Velsigil server has no in-app trial endpoint yet (HTTP 404 with the Velsigil error code `not_found`). The seller must update the panel. |
 | `already_licensed` | SDK (`start_trial`) | This device already holds a license for the product (a device secret or offline lease is stored; `codes::kAlreadyLicensed`), and a trial must not replace it. Nothing was sent and the stored state is unchanged. Validate the saved key instead, or call `deactivate(key)` / `clear_local_state()` first. |
@@ -373,7 +375,9 @@ uses fixed text; only a well-formed `requestId` is kept). The mapping is identic
 (SPEC section 14): a known code in a Velsigil error body (`{"error":{"code":...}}`) wins; otherwise
 400 → `validation_error`, 413 → `payload_too_large`, 415 → `unsupported_media_type`, 429 →
 `rate_limited`, 502/503/504 → `network_error` without a Velsigil error body or `internal_error` with one,
-other 5xx → `internal_error`, anything else (3xx, 401, ...) → `invalid_response`.
+other 5xx → `internal_error`, anything else (3xx, 401, ...) → `invalid_response`. `validate()` always reports
+this code; whether `validate_with_offline_fallback()` uses the lease depends on the HTTP status, not on the code
+(see below).
 
 ## In-app free trials
 
@@ -439,6 +443,44 @@ after signed refusals that end offline access. That set is binding for every Vel
 `outdated_version`, `activation_rate_limited`, `clock_skew`, ...) keep it. A successful `deactivate` (or
 `device_not_found`) clears the lease and the device secret. Rolling the system clock back extends a lease
 locally; this is a documented limitation of offline validation, so keep the lease duration short.
+
+### When the offline fallback applies
+
+`validate_with_offline_fallback()` validates online first and uses the stored lease only when the license
+server is **unavailable**:
+
+| Online outcome | Code from `validate()` | Fallback |
+|---|---|---|
+| No HTTP response: DNS, connection refused or reset, TLS failure, timeout | `network_error` | yes |
+| Unsigned HTTP 5xx with an empty, HTML or other non-Velsigil body (a reverse proxy such as IIS ARR or Caddy whose app is down: 502/503/504; a gateway timeout) | `network_error` (502/503/504) / `internal_error` (500, 501, other 5xx) | yes |
+| Unsigned HTTP 5xx with a Velsigil error body (the app is up but its database is down or busy: `500 internal_error`, `503 service_busy`) | `internal_error` (or the body's known code) | yes |
+| Signed answer (`license_revoked`, `license_expired`, `device_revoked`, `product_paused`, ...) | its code | no |
+| Unsigned 4xx (`429 rate_limited` with `Retry-After`, `400 validation_error`, `403 ip_blocked`, `404`, ...) | its code | no |
+| `invalid_response` (bad signature, nonce or product mismatch, a non-envelope body with HTTP 200, 3xx, ...) | `invalid_response` | no |
+
+Only the HTTP status decides, never the body of an unsigned 5xx: whoever can inject an unsigned 5xx can as well
+drop the connection, which allows the fallback anyway, and the lease itself is signed, bound to this device and
+time-limited. A signed answer is final, so a revocation still ends offline access as soon as the application
+reaches the server once. `validate()` never falls back; it reports the real error.
+
+When the fallback applies and a lease is stored, the result is that of `validate_offline()` as is (code, message,
+license and lease), with `offline == true`. Without a stored lease the online result stays:
+
+| Stored lease | Result |
+|---|---|
+| verifies | `ok`, license and features from the lease |
+| past its `exp` | `lease_expired` (the lease stays stored, as with `validate_offline()`) |
+| bad signature, another product or device, malformed | `lease_invalid` (the lease stays stored, as with `validate_offline()`) |
+| none | the original online result with its own code (`network_error` / `internal_error`), `offline == false`; not `no_lease` |
+
+So a `lease_expired` or `lease_invalid` from `validate_with_offline_fallback()` also means that the server was
+unavailable; `validate()` reports that online error itself.
+
+Since 1.0.3 every unsigned 5xx falls back, including a `500 internal_error` and a 502/503/504 with a Velsigil
+error body. Earlier 1.0.x versions fell back only on `network_error`, which already covers an **empty** (or HTML)
+502/503/504: they use the lease when the server answers `503` with an empty body while its database is
+unreachable, but not on any 500 (or other 5xx outside 502/503/504), nor on a 502/503/504 with a Velsigil error
+body such as `503 service_busy`.
 
 ## Device secret persistence
 
@@ -531,7 +573,9 @@ vectors through internal entry points (`src/detail.hpp`, not installed and not p
 - `velsigil_client_tests`: client behaviour against an in-process signing server (injected transport and
   clock, signing with a key pair generated for the run): ok, business failure, nonce mismatch, bad signature, wrong
   key, `clock_skew` + successful retry, device secret persisted and re-sent, 400/429/500 and other unsigned
-  errors, timeout, connection refused, offline fallback with lease expiry, the HTTPS policy for download
+  errors, timeout, connection refused, offline fallback (valid, expired, invalid or no stored lease) and on
+  every unsigned 5xx (Velsigil error, HTML, empty or garbled body; never on signed or 4xx answers), the HTTPS
+  policy for download
   grants (`get_download`) and `download_release`, configuration hardening (including the refusal of the
   test-vector keys outside loopback hosts), the low-level helpers (a product's own key verifies, the published
   test-vector key is refused), `FileStore` (including the read-only fallback to a legacy
@@ -539,4 +583,5 @@ vectors through internal entry points (`src/detail.hpp`, not installed and not p
 - `velsigil_untyped_optin_tests`: the opt-in type-less `verify_envelope` overloads
   (`VELSIGIL_ALLOW_UNTYPED_ENVELOPE`) compile, fail closed on garbage and refuse the published test-vector keys.
 - `velsigil_http_tests` (`-DVX_BUILD_HTTP_TESTS=ON`): the same flows over real HTTP with libcurl against
-  `tests/mock_server/mock_server.py`, including verified downloads. See `tests/mock_server/README.md`.
+  `tests/mock_server/mock_server.py`, including verified downloads and the offline fallback on 500/502/503/504
+  outages. See `tests/mock_server/README.md`.

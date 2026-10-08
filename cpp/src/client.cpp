@@ -648,9 +648,10 @@ std::string unsigned_message(const char* code, long status) {
 // Velsigil SDK (SPEC section 14): a known code in a Velsigil error body ({"error":{"code":...}}) wins;
 // otherwise 400 -> validation_error, 413 -> payload_too_large, 415 -> unsupported_media_type,
 // 429 -> rate_limited, 502/503/504 -> network_error without a Velsigil error body (a proxy in front of
-// an unreachable server, so the offline fallback applies) or internal_error with one, other 5xx ->
-// internal_error, anything else -> invalid_response. `type`: the endpoint of the request; a Velsigil 404
-// `not_found` from the in-app trial endpoint means the server predates it (panel_too_old).
+// an unreachable server) or internal_error with one, other 5xx -> internal_error, anything else ->
+// invalid_response. `type`: the endpoint of the request; a Velsigil 404 `not_found` from the in-app trial
+// endpoint means the server predates it (panel_too_old). The offline fallback does not depend on this
+// mapping: it applies to every unsigned 5xx (see server_unavailable_status).
 ValidationResult unsigned_failure(long status, const json* body, std::string_view type) {
   std::string code;
   std::string request_id;
@@ -702,6 +703,15 @@ ValidationResult unsigned_failure(long status, const json* body, std::string_vie
   if (is_safe_request_id(request_id)) result.request_id = std::move(request_id);
   return result;
 }
+
+// An unsigned HTTP 5xx means the license server is unavailable: the app is up but cannot answer (its database
+// is down: 500 internal_error, 503 service_busy or an empty 503) or the gateway in front of it cannot reach it
+// (IIS ARR / Caddy 502, 503, 504, often with an HTML or empty body). validate_with_offline_fallback() treats it
+// like a missing response (network_error). Only the status counts, never the body (Velsigil error, HTML, empty
+// or garbled): whoever can inject an unsigned 5xx can as well drop the connection, which already allows the
+// fallback, and the lease itself is signed, bound to this device and time-limited. Signed answers (always HTTP
+// 200) and every 4xx (429 rate_limited, 400 validation_error, ...) stay final.
+bool server_unavailable_status(long status) noexcept { return status >= 500 && status <= 599; }
 
 // Signed denials after which a stored offline lease must not be used any more. This exact set is
 // binding for every Velsigil SDK (SPEC section 14); any other signed failure keeps the lease.
@@ -1033,6 +1043,14 @@ std::string hash_hardware_id(std::string_view hwid) { return detail::sha256_hex(
 
 // ---- Client::Impl ---------------------------------------------------------------------------------
 
+namespace {
+// Empty optional strings are omitted from requests (the server treats them as absent).
+std::optional<std::string> non_empty(const std::optional<std::string>& value) {
+  if (value && !value->empty()) return value;
+  return std::nullopt;
+}
+}  // namespace
+
 struct Client::Impl {
   std::string endpoint_base;  // "<origin>/api/client/v1"
   std::string origin;         // "<scheme>://<authority>"
@@ -1050,8 +1068,9 @@ struct Client::Impl {
   // Serializes the device-bound calls (validate, start_trial, deactivate, get_download, clear_local_state):
   // reading the stored state, the request and persisting the answer form one step, as in the Node and Python
   // SDKs. So a device secret issued to the first of two concurrent activations is sent by the second, and
-  // start_trial's already_licensed check cannot be overtaken by a concurrent validate. Not recursive: Impl
-  // methods never take it; the Client member functions do, once each.
+  // start_trial's already_licensed check cannot be overtaken by a concurrent validate. Not recursive: the
+  // Client member functions take it, once each; the only Impl method that takes it is validate() (the shared
+  // body of Client::validate and validate_with_offline_fallback, which do not take it themselves).
   std::mutex device_mutex;
 
   void configure(std::string api_url, std::string product, const std::string& public_key_base64, ClientOptions options) {
@@ -1248,8 +1267,15 @@ struct Client::Impl {
   // Sends one signed-protocol request; on a signed clock_skew it learns the offset and retries once.
   // `device_bound`: the answer must describe this device although no device secret is sent (the in-app
   // trial start, whose strict request schema has no deviceSecret field).
+  // `server_unavailable` (may be null) tells whether the returned result means the server is unavailable: no
+  // HTTP response (network_error) or an unsigned HTTP 5xx, whatever its body (server_unavailable_status). Every
+  // network_error result sets it; validate_with_offline_fallback() falls back on exactly these results.
   ValidationResult call(const char* path, std::string_view type, const json& fields, bool attach_device_secret,
-                        bool device_bound = false) {
+                        bool device_bound = false, bool* server_unavailable = nullptr) {
+    auto mark_unavailable = [server_unavailable](bool value) {
+      if (server_unavailable != nullptr) *server_unavailable = value;
+    };
+    mark_unavailable(false);
     if (!config_error.empty()) return failure(codes::kInvalidConfiguration, config_error);
     const std::string url = endpoint_base + path;
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -1270,9 +1296,11 @@ struct Client::Impl {
       try {
         response = transport->post_json(url, request_body, timeout);
       } catch (...) {
+        mark_unavailable(true);
         return failure(codes::kNetworkError, "Could not reach the license server: the HTTP transport failed.");
       }
       if (!response.transport_ok) {
+        mark_unavailable(true);
         std::string message = "Could not reach the license server";
         if (!response.error.empty() && !has_control_characters(response.error)) {
           message += ": ";
@@ -1292,9 +1320,27 @@ struct Client::Impl {
         continue;
       }
       if (interpreted.verified) persist(type, interpreted);
+      // interpret() reads every non-200 answer as unsigned, so a 5xx is never a verified (signed) answer.
+      mark_unavailable(!interpreted.verified && server_unavailable_status(response.status));
       return std::move(interpreted.result);
     }
     return failure(codes::kClockSkew, "The local clock could not be synchronised with the license server.");
+  }
+
+  // Client::validate() and validate_with_offline_fallback(): the local checks, then the request under the
+  // device lock. `server_unavailable` (may be null) as for call().
+  ValidationResult validate(const std::string& license_key, const ValidateOptions& options, bool* server_unavailable) {
+    if (server_unavailable != nullptr) *server_unavailable = false;
+    const auto version = non_empty(options.version);
+    const auto device_name = non_empty(options.device_name);
+    if (auto problem = precheck(&license_key, version, device_name)) return std::move(*problem);
+    json fields = json::object();
+    fields["licenseKey"] = std::string(trim(license_key));
+    fields["hwid"] = hwid;
+    if (device_name) fields["deviceName"] = *device_name;
+    if (version) fields["version"] = *version;
+    const std::lock_guard<std::mutex> device_lock(device_mutex);
+    return call("/validate", "validate", fields, true, false, server_unavailable);
   }
 
   ValidationResult offline() const {
@@ -1367,27 +1413,10 @@ const std::string& Client::hardware_id() const noexcept {
   return impl_ ? impl_->hwid : empty;
 }
 
-namespace {
-// Empty optional strings are omitted from requests (the server treats them as absent).
-std::optional<std::string> non_empty(const std::optional<std::string>& value) {
-  if (value && !value->empty()) return value;
-  return std::nullopt;
-}
-}  // namespace
-
 ValidationResult Client::validate(const std::string& license_key, const ValidateOptions& options) {
   if (!impl_) return not_initialised();
   try {
-    const auto version = non_empty(options.version);
-    const auto device_name = non_empty(options.device_name);
-    if (auto problem = impl_->precheck(&license_key, version, device_name)) return std::move(*problem);
-    json fields = json::object();
-    fields["licenseKey"] = std::string(trim(license_key));
-    fields["hwid"] = impl_->hwid;
-    if (device_name) fields["deviceName"] = *device_name;
-    if (version) fields["version"] = *version;
-    const std::lock_guard<std::mutex> device_lock(impl_->device_mutex);
-    return impl_->call("/validate", "validate", fields, true);
+    return impl_->validate(license_key, options, nullptr);
   } catch (...) {
     return unexpected_failure();
   }
@@ -1485,20 +1514,27 @@ ValidationResult Client::validate_offline() {
   }
 }
 
+// Falls back to the stored lease only when the server is unavailable: no HTTP response (network_error) or an
+// unsigned HTTP 5xx whatever its body (internal_error, or network_error for a 502/503/504 without a Velsigil error
+// body; see server_unavailable_status). Signed answers, 4xx answers and invalid responses are returned as they are.
+// The fallback is validate_offline() itself (docs/CLIENT_PROTOCOL.md section 9): its offline result, ok for a usable
+// lease, else lease_expired / lease_invalid, with the stored lease left exactly as validate_offline() leaves it. Only
+// when no lease is stored (no_lease) is the original online result (network_error, internal_error) returned.
 ValidationResult Client::validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& options) {
-  ValidationResult online = validate(license_key, options);
-  if (online.code != codes::kNetworkError || !impl_) return online;
+  if (!impl_) return not_initialised();
+  bool server_unavailable = false;
+  ValidationResult online;
   try {
-    ValidationResult offline = impl_->offline();
-    if (offline.ok) {
-      offline.message = "The license server is unreachable; validated with the stored offline lease.";
-      return offline;
-    }
-    online.message += " Offline fallback unavailable: " + offline.message;
-    return online;
+    online = impl_->validate(license_key, options, &server_unavailable);
   } catch (...) {
-    return online;
+    return unexpected_failure();
   }
+  if (!server_unavailable) return online;
+  ValidationResult offline = validate_offline();  // the same checks and error handling as a direct call
+  // Without any stored lease the original failure is the more useful answer; otherwise validate_offline()'s
+  // result as is (code, message, offline flag, license and lease), as in every Velsigil SDK.
+  if (offline.code == codes::kNoLease) return online;
+  return offline;
 }
 
 DownloadFileResult Client::download_release(const DownloadInfo& download, const std::filesystem::path& destination) {

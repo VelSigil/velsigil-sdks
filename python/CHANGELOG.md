@@ -1,5 +1,27 @@
 # Changelog - Velsigil Python SDK (`velsigil-client`)
 
+## 1.0.3 (2026-10-08)
+
+### Fixed
+
+- `validate_with_offline_fallback()` now also uses the stored offline lease when the license server is up but
+  cannot serve: on **any unsigned HTTP 5xx answer**, whatever its body (a Velsigil `internal_error` while the
+  server's database is down, a 503 `service_busy`, a proxy's HTML error page, an empty, garbled or oversized
+  body). Before, only `network_error` (no answer, or a 502/503/504 without a Velsigil error body) fell back, so
+  an app whose seller's server answered 500 `internal_error` stopped working although it held a valid lease.
+  Still final, never falling back: every signed answer (`license_revoked`, `license_expired`, ...), unsigned
+  4xx answers (`rate_limited`, `validation_error`, `ip_blocked`, `unknown_product`, ...), redirects and
+  `invalid_response` on an HTTP 200 (bad signature, mismatches, unsigned success). Without any stored lease the
+  original failure is returned, as for `network_error` (same `code` and `http_status`); for an unusable stored
+  lease see the next entry. `validate()` is unchanged and reports the real error; no new result code. An
+  oversized response body now keeps its `http_status` on the `invalid_response` result.
+- `validate_with_offline_fallback()`: when it falls back (server unavailable) and the stored lease cannot be used,
+  it now returns `validate_offline()`'s result, `lease_expired` or `lease_invalid` with `offline=True` (the stored
+  lease kept or removed exactly as by `validate_offline()`; an expired one is kept), instead of the original
+  `network_error` / `internal_error` with the lease status appended to its message. Only when no lease is stored
+  at all is the original online result returned, now unchanged (its message no longer names `no_lease`). This is
+  the cross-SDK rule (CLIENT_PROTOCOL section 9), as in the Node and C# SDKs. `validate()` is unchanged.
+
 ## 1.0.2 (2026-10-08)
 
 ### Security

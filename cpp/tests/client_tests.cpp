@@ -918,13 +918,21 @@ void test_offline_fallback(const Keys& keys) {
   const auto limited = h.client.validate_with_offline_fallback(kLicenseKey);
   check(!limited.ok && limited.code == "rate_limited" && !limited.offline, "unsigned 429 never falls back");
 
+  // An expired lease while the server is unavailable: the fallback answers what validate_offline() answers
+  // (lease_expired, offline) instead of the network error, and the lease stays stored.
   mode = "down";
   *h.clock = now + 86400;  // lease exp reached
   const auto expired = h.client.validate_with_offline_fallback(kLicenseKey);
-  check(!expired.ok && expired.code == "network_error", "expired lease: the network error is reported");
-  check(expired.message.find("Offline fallback unavailable") != std::string::npos, "expired lease: reason appended");
+  check(!expired.ok && expired.code == "lease_expired" && expired.offline, "expired lease + server unavailable: lease_expired");
+  check(expired.message.find("lease has expired") != std::string::npos, "expired lease: validate_offline()'s message");
+  check(!expired.license && !expired.lease, "expired lease: no license from the lease");
   const auto expired_direct = h.client.validate_offline();
   check(!expired_direct.ok && expired_direct.code == "lease_expired" && expired_direct.offline, "validate_offline: lease_expired");
+  check_equal(expired.message, expired_direct.message, "expired lease: the fallback result is validate_offline()'s");
+  check(stored(h, velsigil::store_keys::kLease).has_value(), "expired lease: kept");
+  const auto expired_plain = h.client.validate(kLicenseKey);
+  check(!expired_plain.ok && expired_plain.code == "network_error" && !expired_plain.offline,
+        "expired lease: validate() still reports the network error");
 
   *h.clock = now + 60;
   mode = "revoked";
@@ -932,8 +940,199 @@ void test_offline_fallback(const Keys& keys) {
   check(!revoked.ok && revoked.code == "license_revoked" && !revoked.offline, "signed revocation is not overridden");
   mode = "down";
   const auto after_revoke = h.client.validate_with_offline_fallback(kLicenseKey);
-  check(!after_revoke.ok && after_revoke.code == "network_error", "no offline access after a revocation");
+  check(!after_revoke.ok && after_revoke.code == "network_error" && !after_revoke.offline,
+        "no offline access after a revocation: no lease, the original network error");
   check(h.client.validate_offline().code == "no_lease", "revocation removed the stored lease");
+}
+
+// The license server is unavailable although something answers: the app is up but its database is down
+// (500 internal_error, 503 service_busy, an empty 503), or the gateway in front of it (IIS ARR, Caddy) cannot reach
+// it (502/503/504 with an HTML or empty body). Every unsigned HTTP 5xx, whatever its body, falls back to the stored
+// lease like a missing response; validate() itself still reports the real error. Signed answers, 4xx answers and
+// invalid responses stay final.
+void test_offline_fallback_server_unavailable(const Keys& keys) {
+  const std::int64_t now = kStartTime;
+  struct Case {
+    long status;
+    std::string body;
+    std::string expected;  // the code validate() reports (the unsigned-error mapping is unchanged)
+  };
+  // The first four are the outage shapes that must work without and with a lease (see below).
+  const std::vector<Case> unavailable = {
+      {500, R"({"error":{"code":"internal_error","message":"An unexpected error occurred.","requestId":"req-500"}})",
+       "internal_error"},
+      {503, "", "network_error"},
+      {502, "<html><head><title>502 Bad Gateway</title></head><body><h1>Bad Gateway</h1></body></html>", "network_error"},
+      {504, "", "network_error"},
+      // What the server answers when its database is busy or unreachable (with Retry-After).
+      {503, R"({"error":{"code":"service_busy","message":"The service is busy. Please try again shortly."}})",
+       "internal_error"},
+      {500, "<html><body>500 - Internal server error.</body></html>", "internal_error"},
+      {500, "", "internal_error"},
+      {502, R"({"error":{"code":"internal_error"}})", "internal_error"},
+      {504, R"({"message":"Gateway Timeout"})", "network_error"},
+      {503, R"({"error":{"code":)", "network_error"},  // garbled JSON
+      {501, "Not Implemented", "internal_error"},
+      {599, "\xff\xfe not json", "internal_error"},
+      {500, "[1,2,3]", "internal_error"},
+      {500, R"({"ok":true,"code":"ok"})", "internal_error"},           // an unsigned body is never an answer
+      {503, R"({"error":{"code":"rate_limited"}})", "rate_limited"},  // the status decides, not the body's code
+  };
+
+  for (const Case& c : unavailable) {
+    const std::string name = "HTTP " + std::to_string(c.status) + " " + c.body;
+    Harness h(keys);
+    const std::string lease = h.signer.lease(lease_claims(now, now + 86400));
+    h.store->set(kProduct, velsigil::store_keys::kLease, lease);
+    h.server->handler = [&c](const std::string&, const json&) { return http(c.status, c.body); };
+
+    const auto plain = h.client.validate(kLicenseKey);
+    check(!plain.ok && !plain.offline, name + ": validate() itself does not fall back");
+    check_equal(plain.code, c.expected, name + ": validate() reports the real error");
+
+    const auto fallback = h.client.validate_with_offline_fallback(kLicenseKey);
+    check(fallback.ok && fallback.offline, name + ": falls back to the stored lease");
+    check_equal(fallback.code, velsigil::codes::kOk, name + ": fallback code");
+    check(fallback.has_feature("pro") && fallback.lease && fallback.lease->expires_at == now + 86400,
+          name + ": the license comes from the lease");
+    check_equal(fallback.message, h.client.validate_offline().message, name + ": validate_offline()'s result as is");
+    check(h.server->requests.size() == 2, name + ": one request per call, no retry");
+    check(stored(h, velsigil::store_keys::kLease) == lease, name + ": the stored lease is kept");
+  }
+
+  // Without a usable lease (docs/CLIENT_PROTOCOL.md section 9): a stored lease that cannot be used gives what
+  // validate_offline() gives (lease_expired / lease_invalid, offline, the lease kept), not the online error; only
+  // when no lease is stored is the original error returned, exactly as validate() reports it (not no_lease).
+  const Signer wrong_signer(keys.wrong_seed);
+  struct Unusable {
+    std::string name;
+    std::function<std::string(const Harness&)> token;
+    std::string expected;      // validate_offline()'s code
+    std::string message_part;  // from validate_offline()'s message
+  };
+  const std::vector<Unusable> unusable = {
+      {"expired lease", [now](const Harness& h) { return h.signer.lease(lease_claims(now - 86400, now)); },  // exp reached
+       velsigil::codes::kLeaseExpired, "lease has expired"},
+      {"lease of another device",
+       [now](const Harness& h) { return h.signer.lease(lease_claims(now, now + 86400, "another-device-hwid")); },
+       velsigil::codes::kLeaseInvalid, "different device"},
+      {"lease of another product",
+       [now](const Harness& h) {
+         json claims = lease_claims(now, now + 86400);
+         claims["productId"] = kOtherProduct;
+         return h.signer.lease(claims);
+       },
+       velsigil::codes::kLeaseInvalid, "different product"},
+      {"tampered lease",
+       [now](const Harness& h) {
+         // A feature added to the claims, the signature of the genuine lease kept.
+         const std::string genuine = h.signer.lease(lease_claims(now, now + 86400));
+         json claims = lease_claims(now, now + 86400);
+         claims["features"].push_back("enterprise");
+         return b64url(claims.dump()) + genuine.substr(genuine.find('.'));
+       },
+       velsigil::codes::kLeaseInvalid, "invalid signature"},
+      {"lease signed with another key",
+       [now, &wrong_signer](const Harness&) { return wrong_signer.lease(lease_claims(now, now + 86400)); },
+       velsigil::codes::kLeaseInvalid, "invalid signature"},
+      {"malformed lease", [](const Harness&) { return std::string("not-a-lease"); }, velsigil::codes::kLeaseInvalid,
+       "malformed"},
+  };
+  for (std::size_t i = 0; i < 4; ++i) {
+    const Case& c = unavailable[i];
+    const std::string name = "HTTP " + std::to_string(c.status) + " " + c.body;
+    auto respond = [&c](const std::string&, const json&) { return http(c.status, c.body); };
+    {
+      Harness h(keys);
+      h.server->handler = respond;
+      const auto plain = h.client.validate(kLicenseKey);
+      const auto none = h.client.validate_with_offline_fallback(kLicenseKey);
+      check(!none.ok && !none.offline, name + ", no lease: not ok, not offline");
+      check_equal(none.code, c.expected, name + ", no lease: the original error, not no_lease");
+      check_equal(none.message, plain.message, name + ", no lease: the original message, nothing appended");
+      check(none.request_id == plain.request_id, name + ", no lease: the original request id");
+      check_equal(h.client.validate_offline().code, velsigil::codes::kNoLease, name + ", no lease: validate_offline()");
+      check(!stored(h, velsigil::store_keys::kLease), name + ", no lease: nothing stored");
+    }
+    for (const Unusable& u : unusable) {
+      const std::string what = name + ", " + u.name;
+      Harness h(keys);
+      const std::string lease = u.token(h);
+      h.store->set(kProduct, velsigil::store_keys::kLease, lease);
+      h.server->handler = respond;
+      const auto result = h.client.validate_with_offline_fallback(kLicenseKey);
+      check(!result.ok && result.offline, what + ": not ok, offline");
+      check_equal(result.code, u.expected, what + ": validate_offline()'s code, not the online error");
+      check(result.message.find(u.message_part) != std::string::npos, what + ": validate_offline()'s message");
+      check(!result.license && !result.lease && !result.request_id, what + ": nothing from the lease or the online answer");
+      check(h.server->requests.size() == 1, what + ": one request, no retry");
+      check(stored(h, velsigil::store_keys::kLease) == lease, what + ": the stored lease is kept");
+      const auto direct = h.client.validate_offline();
+      check_equal(direct.code, u.expected, what + ": validate_offline()");
+      check_equal(result.message, direct.message, what + ": the same result as validate_offline()");
+      const auto plain = h.client.validate(kLicenseKey);
+      check_equal(plain.code, c.expected, what + ": validate() still reports the online error");
+    }
+  }
+
+  // Final answers: never overridden by the lease, whatever is stored.
+  struct Final {
+    std::string name;
+    std::function<HttpResponse(const Harness&, const json&)> respond;
+    std::string expected;
+    bool lease_kept;
+  };
+  const std::vector<Final> finals = {
+      {"429 rate_limited",
+       [](const Harness&, const json&) {
+         return http(429, R"({"error":{"code":"rate_limited","message":"Too many requests.","requestId":"req-429"}})");
+       },
+       "rate_limited", true},
+      {"429 without a body", [](const Harness&, const json&) { return http(429, ""); }, "rate_limited", true},
+      {"400 validation_error",
+       [](const Harness&, const json&) {
+         return http(400, R"({"error":{"code":"validation_error","message":"Invalid request body."}})");
+       },
+       "validation_error", true},
+      {"403 ip_blocked", [](const Harness&, const json&) { return http(403, R"({"error":{"code":"ip_blocked"}})"); },
+       "ip_blocked", true},
+      {"404 HTML", [](const Harness&, const json&) { return http(404, "<html>Not Found</html>"); }, "invalid_response", true},
+      {"signed license_revoked",
+       [now](const Harness& h, const json& request) {
+         json p = payload(request, "validate", false, "license_revoked", now);
+         p["license"] = license_json(std::nullopt, "revoked");
+         return http(200, h.signer.envelope(p));
+       },
+       "license_revoked", false},
+      {"signed product_paused",
+       [now](const Harness& h, const json& request) {
+         return http(200, h.signer.envelope(payload(request, "validate", false, "product_paused", now)));
+       },
+       "product_paused", true},
+      {"200 with a bad signature",
+       [now](const Harness& h, const json& request) {
+         return http(200, h.signer.envelope(payload(request, "validate", true, "ok", now), true));
+       },
+       "invalid_response", true},
+      {"200 signed with another key",
+       [now, &wrong_signer](const Harness&, const json& request) {
+         return http(200, wrong_signer.envelope(payload(request, "validate", true, "ok", now)));
+       },
+       "invalid_response", true},
+      {"200 HTML", [](const Harness&, const json&) { return http(200, "<html>proxy</html>"); }, "invalid_response", true},
+      {"200 empty", [](const Harness&, const json&) { return http(200, ""); }, "invalid_response", true},
+  };
+  for (const Final& f : finals) {
+    Harness h(keys);
+    const std::string lease = h.signer.lease(lease_claims(now, now + 86400));
+    h.store->set(kProduct, velsigil::store_keys::kLease, lease);
+    h.server->handler = [&h, &f](const std::string&, const json& request) { return f.respond(h, request); };
+    const auto result = h.client.validate_with_offline_fallback(kLicenseKey);
+    check(!result.ok && !result.offline, f.name + ": no fallback");
+    check_equal(result.code, f.expected, f.name + ": code");
+    check(result.message.find("offline lease") == std::string::npos, f.name + ": the online message, no lease consulted");
+    check(stored(h, velsigil::store_keys::kLease).has_value() == f.lease_kept, f.name + ": stored lease");
+  }
 }
 
 void test_deactivate(const Keys& keys) {
@@ -1935,6 +2134,7 @@ int main(int argc, char** argv) {
     test_start_trial(keys);
     test_network_errors(keys);
     test_offline_fallback(keys);
+    test_offline_fallback_server_unavailable(keys);
     test_deactivate(keys);
     test_device_binding(keys);
     test_update_and_download(keys);

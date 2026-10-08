@@ -140,7 +140,7 @@ Ed25519 backend is installed, and `HardwareIdError` when the machine id can't be
 | `get_download(license_key, version=None)` | Returns `result.download` (`DownloadInfo`) with a short-lived link. The device must already be activated when the product locks HWIDs. |
 | `download_to_file(download, destination)` | Streams the release to `destination` and checks its **signed size and SHA-256** before moving it into place. Returns the absolute path; raises `DownloadError` on failure. |
 | `validate_offline()` | Checks the stored lease without network access. Result has `offline=True`. |
-| `validate_with_offline_fallback(license_key, version=None, device_name=None)` | Calls `validate()` first. **Only if it returns `network_error`** does it fall back to `validate_offline()`. |
+| `validate_with_offline_fallback(license_key, version=None, device_name=None)` | Calls `validate()` first. **Only while the server is unavailable** (no HTTP answer, `network_error`, or any unsigned HTTP 5xx answer; see [Offline leases](#offline-leases)) does it fall back to `validate_offline()` and return its result (`ok` with `offline=True`, `lease_expired` or `lease_invalid`); with no lease stored at all it returns the original `network_error` / `internal_error` result instead of `no_lease`. |
 | `clear_stored_state()` | Forgets the stored device secret and lease for this product. |
 | `VelsigilClient.get_hardware_id()` *(static)* | This machine's HWID (see below). |
 
@@ -254,11 +254,11 @@ deleted), `io_error` (the destination could not be written), `network_error` (tr
 | `ip_blocked` | unsigned 403 | Network temporarily blocked. |
 | `unknown_product` | unsigned 404 | Wrong product id or server. |
 | `rate_limited` | unsigned 429 | Back off. `result.retry_after` holds seconds when sent. |
-| `internal_error` | unsigned 5xx | Server error (also 502/503/504 **with** a Velsigil error body). |
+| `internal_error` | unsigned 5xx | Server error (also 502/503/504 **with** a Velsigil error body), for example while the server's database is down. Like every unsigned 5xx it triggers the offline fallback. |
 | `payload_too_large` · `unsupported_media_type` | unsigned 413/415 | Should not happen with this SDK (also mapped from a bodiless 413/415, e.g. from a proxy). |
-| `network_error` | SDK | DNS, connect, TLS or timeout failure, or an HTTP 502/503/504 without a Velsigil error body (gateway can't reach the server). This is the **only** code that triggers the offline fallback. |
+| `network_error` | SDK | DNS, connect, TLS or timeout failure, or an HTTP 502/503/504 without a Velsigil error body (gateway can't reach the server). Triggers the offline fallback, as does any other unsigned 5xx answer (`http_status` 500–599). |
 | `invalid_response` | SDK | Signature invalid, nonce/product/type mismatch (the signed `type` must match the endpoint), a signed lease or `activation.hwidHash` that belongs to another device (the request was rewritten in transit; nothing from the response is stored), malformed or oversized body, unsigned success, unexpected status (including redirects, which are never followed). Treat it as a failure. |
-| `no_lease` · `lease_expired` · `lease_invalid` | SDK | Offline validation: nothing stored, lease past `exp`, or lease rejected (signature, type, product or HWID). |
+| `no_lease` · `lease_expired` · `lease_invalid` | SDK | Offline validation: nothing stored, lease past `exp`, or lease rejected (signature, type, product or HWID). `validate_with_offline_fallback()` returns `lease_expired` / `lease_invalid` (with `offline=True`) when it falls back to an unusable stored lease, never `no_lease`. |
 | `invalid_configuration` | SDK | `ConfigurationError.code` (the constructor raises). |
 | `download_failed` · `integrity_mismatch` · `io_error` | SDK | `DownloadError.code` from `download_to_file()`. |
 | `panel_too_old` | SDK | `start_trial`: the Velsigil server has no in-app trial endpoint yet (HTTP 404 with the Velsigil error code `not_found`). The seller must update the panel. |
@@ -322,9 +322,26 @@ rejected as a whole (`invalid_response`), not accepted without the lease.
 
 - `validate_offline()` accepts the stored lease only if the signature is valid, `typ` is
   `"lease"`, product id and HWID hash match, and `now < exp`.
-- `validate_with_offline_fallback()` uses the lease **only for `network_error`**. A business
-  failure, rate limiting or an invalid or unsigned response never falls back, because an
-  attacker who can tamper with responses must not be able to switch the app to offline mode.
+- `validate_with_offline_fallback()` uses the lease **only while the server is unavailable**:
+
+  | `validate()` result | Falls back to the lease? |
+  |---|---|
+  | `network_error`: no HTTP answer (DNS, connect, TLS, timeout, connection reset) or a 502/503/504 without a Velsigil error body | yes |
+  | any other **unsigned HTTP 5xx** answer (`result.http_status` 500–599), whatever its body: a Velsigil error such as `internal_error` (the server is up but its database is not), a proxy's HTML error page, an empty, garbled or oversized body. The code is usually `internal_error` | yes |
+  | every **signed** answer (`license_revoked`, `license_expired`, `device_revoked`, `product_paused`, ...) | no |
+  | unsigned 4xx (`rate_limited` with `retry_after`, `validation_error`, `ip_blocked`, `unknown_product`, ...), redirects | no |
+  | `invalid_response` on an HTTP 200 (bad signature, nonce, product or type mismatch, unsigned or malformed body) | no |
+
+  A server answer that is not a 5xx never falls back, so a definitive denial or a tampered success
+  can't switch the app to offline mode. Falling back on an unsigned 5xx gives an attacker nothing
+  new: one who can inject such an answer can as well drop the connection, which already means
+  `network_error`; and the lease itself is signed, bound to this device and time-limited.
+  When it falls back, the result is exactly that of `validate_offline()`: `ok` with `offline=True`
+  for a usable lease, `lease_expired` or `lease_invalid` (also `offline=True`) for a stored lease
+  that cannot be used (the stored lease is left as `validate_offline()` leaves it; an expired one
+  is kept). Only when no lease is stored at all is the result the original online failure (same
+  `code`, `message` and `http_status` as `validate()`, `offline=False`), not `no_lease`.
+  `validate()` itself never falls back: it always reports the real error.
 - A signed, definitive denial **deletes** the stored lease. The set is the same in every Velsigil
   SDK (`velsigil_client.LEASE_REVOKING_CODES`): `invalid_key`, `license_expired`,
   `license_suspended`, `license_revoked`, `license_banned`, `device_revoked`,
@@ -435,7 +452,9 @@ python -m unittest discover -s tests -t . -v
   server that signs with the vector key. It covers success, business failure, nonce, product and
   type mismatch, bad signatures, unsigned success, clock skew with a single retry, device secret
   persistence and re-sending, 400/403/404/429/500/502/503, redirects, oversized bodies, timeouts,
-  connection refused, offline fallback with a fake clock, deactivation, updates, verified
+  connection refused, offline fallback with a fake clock (including on every unsigned 5xx: a Velsigil
+  `internal_error`, empty 503/504, a proxy's HTML 502; and never on 4xx or signed answers; `lease_expired` /
+  `lease_invalid` for an unusable stored lease, the original error without one), deactivation, updates, verified
   downloads, concurrency and log hygiene.
 
 Set `VELSIGIL_TEST_VECTORS` to use a vectors file at another location.

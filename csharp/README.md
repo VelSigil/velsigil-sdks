@@ -146,7 +146,7 @@ The constructor throws `ArgumentException` / `ArgumentOutOfRangeException` for i
 | Member | Description |
 |---|---|
 | `Task<VelsigilResult> ValidateAsync(string licenseKey, ValidateOptions? options = null, CancellationToken ct = default)` | Validates the key for this device, activating it if a slot is free. Persists a newly issued device secret and the offline lease. `ValidateOptions { Version (≤ 32), DeviceName (≤ 255) }`. |
-| `Task<VelsigilResult> ValidateWithOfflineFallbackAsync(string licenseKey, ValidateOptions? options = null, CancellationToken ct = default)` | Online first; **only** on `network_error` falls back to `ValidateOffline()`. Any server answer, including failures and `invalid_response`, is returned as is. If no lease is stored, the original `network_error` result is returned (not `no_lease`), as in every Velsigil SDK. |
+| `Task<VelsigilResult> ValidateWithOfflineFallbackAsync(string licenseKey, ValidateOptions? options = null, CancellationToken ct = default)` | Online first; falls back to `ValidateOffline()` **only** when the server is unavailable: `network_error` (no response) or any unsigned HTTP 5xx answer (`internal_error`, or `network_error` for a gateway 502/503/504 without a Velsigil error body), see [Offline leases](#offline-leases). Signed answers, 4xx answers and `invalid_response` are returned as is. If no lease is stored, the original `network_error` / `internal_error` result is returned (not `no_lease`), as in every Velsigil SDK. |
 | `VelsigilResult ValidateOffline()` | Verifies the stored lease (signature, type, product, this device, expiry). Never touches the network. |
 | `Task<VelsigilResult> StartTrialAsync(StartTrialOptions? options = null, CancellationToken ct = default)` | Starts a free trial of the product on this device without a license key (see [In-app free trials](#in-app-free-trials)). On `Ok`, `result.TrialKey` is the new key: store it, then use `ValidateAsync`. Persists the device secret and lease like `ValidateAsync`. `StartTrialOptions { Version (≤ 32), DeviceName (≤ 255), Email (≤ 254, sent only when set) }`. Returns `already_licensed` locally (nothing sent, nothing changed) when a device secret or lease is already stored for the product, and `store_unavailable` when the store cannot be read. |
 | `Task<VelsigilResult> DeactivateAsync(string licenseKey, CancellationToken ct = default)` | Frees this device's slot. On success the stored device secret and lease are deleted. |
@@ -291,20 +291,21 @@ leaves the machine. Hardware ids are spoofable, which is why the server pairs th
 | `payload_too_large` | 413 | Request too large. |
 | `unsupported_media_type` | 415 | Content type rejected. |
 | `rate_limited` | 429 | Slow down; honour `RetryAfter`. |
-| `internal_error` | 5xx | Server error; retry later (also 502/503/504 **with** a Velsigil error body). |
+| `internal_error` | 5xx | Server error or temporarily unavailable (for example its database is down); retry later. Also 502/503/504 **with** a Velsigil error body. Triggers the offline fallback. |
 
 The mapping is identical in every Velsigil SDK (SPEC section 14): a known code in a Velsigil error body
 (`{ "error": { "code" } }`) wins; otherwise 400 → `validation_error`, 413 → `payload_too_large`, 415 →
 `unsupported_media_type`, 429 → `rate_limited`, 502/503/504 → `network_error` without a Velsigil error body
-(a reverse proxy while the server is down, so the offline fallback applies) or `internal_error` with one,
-other 5xx → `internal_error`. Anything else unexpected (redirects, 401, 404 without a body) is
-`invalid_response`. Unsigned message text is never surfaced.
+(a reverse proxy while the server is down) or `internal_error` with one, other 5xx → `internal_error`.
+Anything else unexpected (redirects, 401, 404 without a body) is `invalid_response`. Unsigned message text is
+never surfaced. `ValidateAsync` reports exactly this code; `ValidateWithOfflineFallbackAsync` falls back on
+every unsigned 5xx, whichever code it maps to (see [Offline leases](#offline-leases)).
 
 ### SDK-side codes (same names in every Velsigil SDK)
 
 | Code | Meaning |
 |---|---|
-| `network_error` | DNS/TCP/TLS failure, timeout, or gateway 502/503/504 without a Velsigil error body. The **only** code that triggers the offline fallback. |
+| `network_error` | DNS/TCP/TLS failure, timeout, or gateway 502/503/504 without a Velsigil error body (an HTML page, an empty body). Triggers the offline fallback, as does every other unsigned 5xx (`internal_error`). |
 | `invalid_response` | Unsigned 200, bad or missing signature, foreign nonce / product / request type (the signed `type` must match the endpoint), a signed lease or `activation.hwidHash` of another device (the request was rewritten in transit; nothing from the response is stored), a download URL outside the https policy, malformed payload, oversized body, redirect. Treat as hostile. |
 | `validation_error` | Local argument check failed (key empty or > 64 chars, `Version` > 32, `DeviceName` > 255); nothing was sent. |
 | `invalid_configuration` | `ResultCodes.InvalidConfiguration`: the cross-SDK name for constructor argument errors, which .NET reports by throwing `ArgumentException`. |
@@ -389,8 +390,23 @@ free-trial license (left out otherwise; fields the SDK does not know are ignored
   signed failures (`product_paused`, `outdated_version`, `activation_rate_limited`, `clock_skew`, ...) keep it.
 * `ValidateOffline()` accepts a lease only if the signature verifies with the pinned key, `typ` is
   `lease`, the product and the hardware-id hash match, and `now < exp`.
-* `ValidateWithOfflineFallbackAsync()` falls back **only** on `network_error`. An attacker who can tamper
-  with responses gets `invalid_response`, not an offline pass; a server that answers "revoked" is final.
+* `ValidateWithOfflineFallbackAsync()` falls back to the stored lease **only when the server is unavailable**:
+
+  | Online result | Fallback? |
+  |---|---|
+  | `network_error`: no HTTP response (DNS, connection refused or reset, TLS, timeout) | yes |
+  | Any **unsigned HTTP 5xx** (500, 502, 503, 504, other 5xx), whatever its body: a Velsigil error body (`internal_error`, the server is up but its database is not), a reverse proxy's HTML page (IIS ARR, Caddy, nginx while the app is down), an empty or garbled body. Reported as `internal_error`, or `network_error` for 502/503/504 without a Velsigil error body | yes |
+  | Every signed answer (`license_revoked`, `license_expired`, `license_banned`, `product_paused`, ...) | no |
+  | 4xx answers (`rate_limited` with `RetryAfter`, `validation_error`, `ip_blocked`, `unknown_product`, 404, ...), whatever their body | no |
+  | `invalid_response` (bad or missing signature, unsigned 200, redirect, ...) | no |
+
+  The HTTP status decides, not the code: `result.HttpStatus` is 500-599 and `result.Verified` is false. When the
+  fallback applies and no lease is stored, the original online result (`network_error` or `internal_error`, with
+  its `HttpStatus` and `RequestId`) is returned; a stored lease that is past its `exp` gives `lease_expired`, one
+  that does not verify gives `lease_invalid`. `ValidateAsync()` never falls back and always reports the real
+  error. Why an unsigned 5xx is safe to fall back on: anyone who can inject one can as well drop the connection,
+  which already falls back, and the lease itself is signed, bound to this device and expires. Tampered answers
+  stay `invalid_response`, never an offline pass, and a server that answers "revoked" is final.
 * `now` is the local clock plus the offset learned from a signed `clock_skew` response. Winding the system
   clock back can stretch a lease up to its `exp`; this is an inherent limitation of offline licensing, so
   keep *offline lease hours* as short as your users can tolerate.
@@ -586,7 +602,8 @@ hardware ids), reproduce the vector signatures with the vector seed, and drive t
 in-process mock server that signs responses with `keys.privateSeedBase64` plus a minimal real HTTP server
 on 127.0.0.1: success, business failures, nonce / product / type mismatches, bad and missing signatures,
 `clock_skew` with a successful retry, device-secret persistence and re-sending, 400/403/404/413/415/429/500,
-gateway errors, timeouts, connection refused, cancellation, offline fallback with a fake clock, verified
+gateway errors, timeouts, connection refused, cancellation, offline fallback with a fake clock (on transport
+failures and on unsigned 500/502/503/504 answers with JSON, HTML or empty bodies, but not on 4xx or signed answers), verified
 downloads and file-store permissions. Because the vector private keys are published, the SDK refuses both vector
 public keys (`keys.publicKey`, `keys.wrongPublicKey`): the client unless the API URL is localhost, 127.0.0.1 or ::1,
 the public `LeaseVerifier.Verify` always. The lease vectors are therefore checked through the SDK's internal

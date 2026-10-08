@@ -46,6 +46,7 @@ from velsigil_client import (  # noqa: E402
     MemoryStore,
     StoredState,
     VelsigilClient,
+    VelsigilResult,
     get_hardware_id,
     key_id_for,
 )
@@ -552,9 +553,13 @@ class OfflineTests(ClientTestCase):
 
         clock.advance(86400)  # past the lease expiry
         expired = offline.validate_with_offline_fallback(LICENSE_KEY)
-        self.assertFailure(expired, Code.NETWORK_ERROR)
-        self.assertIn(Code.LEASE_EXPIRED, expired.message)
+        # The stored lease is unusable: the result is validate_offline()'s, not the original network_error.
+        self.assertFailure(expired, Code.LEASE_EXPIRED)
+        self.assertTrue(expired.offline)
+        self.assertIsNone(expired.http_status)
         self.assertFailure(offline.validate_offline(), Code.LEASE_EXPIRED)
+        # An expired lease is kept, as by validate_offline().
+        self.assertEqual(store.load(PRODUCT_ID).lease_token, first.lease.token)
 
     def test_gateway_outage_falls_back(self):
         clock = FakeClock(1767225600)
@@ -580,6 +585,7 @@ class OfflineTests(ClientTestCase):
         self.assertFailure(client.validate_offline(), Code.NO_LEASE)
 
     def test_no_fallback_on_rate_limit_or_invalid_response(self):
+        # (An unsigned 5xx such as 500 internal_error does fall back: ServerUnavailableFallbackTests.)
         store = MemoryStore()
         logic = LicenseServerLogic()
         server = self.start(logic)
@@ -588,7 +594,7 @@ class OfflineTests(ClientTestCase):
         replies = {
             Code.RATE_LIMITED: lambda request: Reply(429, {"error": {"code": "rate_limited"}}),
             Code.INVALID_RESPONSE: lambda request: signed(request, "ok", ok=True, seed=ms.WRONG_SEED),
-            Code.INTERNAL_ERROR: lambda request: Reply(500, {"error": {"code": "internal_error"}}),
+            Code.VALIDATION_ERROR: lambda request: Reply(400, {"error": {"code": "validation_error"}}),
         }
         for code, reply in replies.items():
             with self.subTest(code=code):
@@ -690,9 +696,13 @@ class OfflineTests(ClientTestCase):
         result = client.validate_offline()
         self.assertFailure(result, Code.NO_LEASE)
         self.assertTrue(result.offline)
+        # No stored lease at all: the fallback returns the original online failure as is, not no_lease.
+        plain = client.validate(LICENSE_KEY)
         fallback = client.validate_with_offline_fallback(LICENSE_KEY)
         self.assertFailure(fallback, Code.NETWORK_ERROR)
-        self.assertIn(Code.NO_LEASE, fallback.message)
+        self.assertFalse(fallback.offline)
+        self.assertIsNone(fallback.http_status)
+        self.assertEqual(fallback.message, plain.message)
 
     def test_tampered_or_foreign_stored_lease_rejected(self):
         exp = int(time.time()) + 3600
@@ -709,8 +719,15 @@ class OfflineTests(ClientTestCase):
             with self.subTest(case=name):
                 store = MemoryStore()
                 store.save(PRODUCT_ID, StoredState(lease_token=token))
-                result = self.make_client(refused_url(), store=store).validate_offline()
+                client = self.make_client(refused_url(), store=store)
+                result = client.validate_offline()
                 self.assertFailure(result, Code.LEASE_INVALID)
+                # Server unreachable: the fallback reports the unusable lease, not network_error.
+                fallback = client.validate_with_offline_fallback(LICENSE_KEY)
+                self.assertFailure(fallback, Code.LEASE_INVALID)
+                self.assertTrue(fallback.offline)
+                self.assertIsNone(fallback.http_status)
+                self.assertEqual(store.load(PRODUCT_ID), StoredState(lease_token=token))
         store = MemoryStore()
         store.save(PRODUCT_ID, StoredState(lease_token=good))
         self.assertTrue(self.make_client(refused_url(), store=store).validate_offline().ok)
@@ -770,6 +787,220 @@ class OfflineTests(ClientTestCase):
         result = self.make_client(server.url, store=store).validate(LICENSE_KEY)
         self.assertTrue(result.ok, result)
         self.assertIsNone(store.load(PRODUCT_ID).lease_token)
+
+
+# An IIS ARR style gateway error page (the app behind the proxy is down).
+HTML_502 = (
+    b"<!DOCTYPE html><html><head><title>502 - Web server received an invalid response while acting as a gateway "
+    b"or proxy server.</title></head><body><h1>Server Error</h1></body></html>"
+)
+
+#: A server (or the proxy in front of it) that is up but cannot serve: unsigned 5xx answers, each with the
+#: code and status plain validate() reports (unchanged by the fallback rule).
+UNAVAILABLE_REPLIES = (
+    (
+        "500 Velsigil internal_error (database down)",
+        lambda request: Reply(
+            500, {"error": {"code": "internal_error", "message": "An unexpected error occurred.", "requestId": "rid-500"}}
+        ),
+        Code.INTERNAL_ERROR,
+        500,
+    ),
+    ("503 empty body, Retry-After", lambda request: Reply(503, None, headers={"Retry-After": "30"}), Code.NETWORK_ERROR, 503),
+    ("502 HTML from the proxy", lambda request: Reply(502, HTML_502, headers={"Content-Type": "text/html"}), Code.NETWORK_ERROR, 502),
+    ("504 empty body", lambda request: Reply(504, b""), Code.NETWORK_ERROR, 504),
+    (
+        "503 Velsigil service_busy",
+        lambda request: Reply(503, {"error": {"code": "service_busy", "message": "Busy."}}, headers={"Retry-After": "2"}),
+        Code.INTERNAL_ERROR,
+        503,
+    ),
+    ("503 Velsigil internal_error", lambda request: Reply(503, {"error": {"code": "internal_error"}}), Code.INTERNAL_ERROR, 503),
+    ("500 HTML", lambda request: Reply(500, b"<html><body>Internal Server Error</body></html>"), Code.INTERNAL_ERROR, 500),
+    ("500 empty body", lambda request: Reply(500, b""), Code.INTERNAL_ERROR, 500),
+    ("500 garbled body", lambda request: Reply(500, b'\xff\xfe{"error": '), Code.INTERNAL_ERROR, 500),
+    ("501 other 5xx", lambda request: Reply(501, b"Not Implemented"), Code.INTERNAL_ERROR, 501),
+    ("599 other 5xx", lambda request: Reply(599, b""), Code.INTERNAL_ERROR, 599),
+    ("500 naming a 4xx code", lambda request: Reply(500, {"error": {"code": "rate_limited"}}), Code.RATE_LIMITED, 500),
+    ("500 carrying a signed ok envelope", lambda request: Reply(500, signed(request, "ok", ok=True).body), Code.INTERNAL_ERROR, 500),
+    ("503 oversized body", lambda request: Reply(503, b"x" * (MAX_RESPONSE_BYTES + 1)), Code.INVALID_RESPONSE, 503),
+)
+
+#: Final answers: returned as is even with a usable lease (last field: whether the stored lease survives).
+FINAL_REPLIES = (
+    (
+        "429 rate_limited, Retry-After",
+        lambda request: Reply(429, {"error": {"code": "rate_limited", "requestId": "rid-429"}}, headers={"Retry-After": "30"}),
+        Code.RATE_LIMITED,
+        True,
+    ),
+    ("429 without body", lambda request: Reply(429, b""), Code.RATE_LIMITED, True),
+    ("400 validation_error", lambda request: Reply(400, {"error": {"code": "validation_error"}}), Code.VALIDATION_ERROR, True),
+    ("403 ip_blocked", lambda request: Reply(403, {"error": {"code": "ip_blocked"}}), Code.IP_BLOCKED, True),
+    ("404 unknown_product", lambda request: Reply(404, {"error": {"code": "unknown_product"}}), Code.UNKNOWN_PRODUCT, True),
+    ("404 HTML", lambda request: Reply(404, b"<html>Not Found</html>"), Code.INVALID_RESPONSE, True),
+    ("307 redirect", lambda request: Reply(307, b"", headers={"Location": "http://127.0.0.1:9/x"}), Code.INVALID_RESPONSE, True),
+    ("200 unsigned HTML", lambda request: Reply(200, b"<html>Captive portal</html>"), Code.INVALID_RESPONSE, True),
+    ("200 bad signature", lambda request: signed(request, "ok", ok=True, seed=ms.WRONG_SEED), Code.INVALID_RESPONSE, True),
+    ("200 oversized", lambda request: Reply(200, b"x" * (MAX_RESPONSE_BYTES + 1)), Code.INVALID_RESPONSE, True),
+    ("signed product_paused", lambda request: signed(request, "product_paused"), Code.PRODUCT_PAUSED, True),
+    ("signed license_revoked", lambda request: signed(request, "license_revoked"), Code.LICENSE_REVOKED, False),
+    ("signed license_expired", lambda request: signed(request, "license_expired"), Code.LICENSE_EXPIRED, False),
+)
+
+
+class ServerUnavailableFallbackTests(ClientTestCase):
+    """validate_with_offline_fallback uses the lease while the server is unavailable: no answer or any unsigned 5xx."""
+
+    def setUp(self):
+        self.clock = FakeClock(1767225600)
+        self.logic = LicenseServerLogic(clock=self.clock, lease_seconds=86400)
+        self.server = self.start(self.logic)
+
+    def _client(self, with_lease=True, **options):
+        store = MemoryStore()
+        client = self.make_client(self.server.url, store=store, clock=self.clock, **options)
+        if with_lease:
+            self.logic.override = None
+            first = client.validate(LICENSE_KEY)
+            self.assertTrue(first.ok and first.lease is not None, first)
+            self.assertIsNotNone(store.load(PRODUCT_ID).lease_token)
+        return client, store
+
+    def test_unsigned_5xx_falls_back_to_a_valid_lease(self):
+        for name, reply, code, status in UNAVAILABLE_REPLIES:
+            with self.subTest(case=name):
+                client, store = self._client()
+                stored = store.load(PRODUCT_ID)
+                self.clock.advance(3600)
+                self.logic.override = reply
+                # validate() itself is unchanged: it reports the real error and never uses the lease.
+                plain = client.validate(LICENSE_KEY)
+                self.assertFailure(plain, code)
+                self.assertEqual(plain.http_status, status)
+                self.assertFalse(plain.offline)
+                result = client.validate_with_offline_fallback(LICENSE_KEY)
+                self.assertTrue(result.ok and result.offline, result)
+                self.assertEqual(result.code, Code.OK)
+                self.assertTrue(result.has_feature("pro"))
+                self.assertEqual(result.license.id, LICENSE_OBJ["id"])
+                self.assertEqual(result.activation.id, ACTIVATION_ID)
+                self.assertIsNone(result.http_status)
+                # An unsigned error never changes the stored state.
+                self.assertEqual(store.load(PRODUCT_ID), stored)
+
+    def test_empty_503_is_network_error_for_validate(self):
+        # The server's "database unreachable" answer (503, Retry-After, empty body) is a transport-level
+        # failure for this SDK's validate() too, as in 1.0.0-1.0.2 (502/503/504 without a Velsigil body).
+        self.logic.override = lambda request: Reply(503, None, headers={"Retry-After": "30"})
+        client, _store = self._client(with_lease=False)
+        result = client.validate(LICENSE_KEY)
+        self.assertFailure(result, Code.NETWORK_ERROR)
+        self.assertEqual(result.http_status, 503)
+        self.assertIsNone(result.retry_after)
+
+    def test_unsigned_5xx_without_a_lease_returns_the_original_error(self):
+        client, store = self._client(with_lease=False)
+        for name, reply, code, status in UNAVAILABLE_REPLIES:
+            with self.subTest(case=name):
+                self.logic.override = reply
+                plain = client.validate(LICENSE_KEY)
+                result = client.validate_with_offline_fallback(LICENSE_KEY)
+                # No stored lease: the original online failure as is (not no_lease).
+                self.assertFailure(result, code)
+                self.assertEqual(result.http_status, status)
+                self.assertFalse(result.offline)
+                self.assertEqual(result.message, plain.message)
+                self.assertEqual(result.retry_after, plain.retry_after)
+                if name.startswith("500 Velsigil"):
+                    self.assertEqual(result.request_id, "rid-500")
+        self.assertEqual(store.load(PRODUCT_ID), StoredState())
+
+    def test_unsigned_5xx_with_an_expired_lease_reports_lease_expired(self):
+        for name, reply, _code, _status in UNAVAILABLE_REPLIES:
+            with self.subTest(case=name):
+                client, store = self._client()
+                stored = store.load(PRODUCT_ID)
+                self.clock.advance(86400)  # the lease's exp is reached
+                self.logic.override = reply
+                result = client.validate_with_offline_fallback(LICENSE_KEY)
+                # The stored lease is unusable: validate_offline()'s result, not the original failure.
+                self.assertFailure(result, Code.LEASE_EXPIRED)
+                self.assertTrue(result.offline)
+                self.assertIsNone(result.http_status)
+                self.assertFailure(client.validate_offline(), Code.LEASE_EXPIRED)
+                # The expired lease is kept, as by validate_offline().
+                self.assertEqual(store.load(PRODUCT_ID), stored)
+
+    def test_unsigned_5xx_with_an_unusable_lease_reports_lease_invalid(self):
+        exp = int(self.clock()) + 3600
+        _body, sig = make_lease(exp).split(".")
+        leases = {
+            "other device": make_lease(exp, hwid="someone-else-0001"),
+            "tampered": ms.encode_payload({"v": 1, "typ": "lease", "productId": PRODUCT_ID}) + "." + sig,
+        }
+        for lease_name, token in leases.items():
+            for name, reply, _code, _status in UNAVAILABLE_REPLIES:
+                with self.subTest(lease=lease_name, case=name):
+                    store = MemoryStore()
+                    store.save(PRODUCT_ID, StoredState(lease_token=token))
+                    client = self.make_client(self.server.url, store=store, clock=self.clock)
+                    self.logic.override = reply
+                    result = client.validate_with_offline_fallback(LICENSE_KEY)
+                    self.assertFailure(result, Code.LEASE_INVALID)
+                    self.assertTrue(result.offline)
+                    self.assertIsNone(result.http_status)
+                    # The stored state is left as validate_offline() leaves it.
+                    self.assertEqual(store.load(PRODUCT_ID), StoredState(lease_token=token))
+
+    def test_final_answers_never_fall_back(self):
+        for name, reply, code, lease_kept in FINAL_REPLIES:
+            with self.subTest(case=name):
+                client, store = self._client()
+                lease = store.load(PRODUCT_ID).lease_token
+                self.logic.override = reply
+                result = client.validate_with_offline_fallback(LICENSE_KEY)
+                self.assertFailure(result, code)
+                self.assertFalse(result.offline)
+                if name.startswith("429 rate_limited"):
+                    self.assertEqual(result.retry_after, 30)
+                    self.assertEqual(result.request_id, "rid-429")
+                if lease_kept:
+                    self.assertEqual(store.load(PRODUCT_ID).lease_token, lease)
+                    self.assertTrue(client.validate_offline().ok)
+                else:
+                    self.assertFailure(client.validate_offline(), Code.NO_LEASE)
+
+    def test_transport_failures_still_fall_back(self):
+        # Timeout (the server accepts but never answers in time) and connection refused.
+        client, store = self._client(timeout=0.5)
+        self.logic.override = lambda request: Reply(200, signed(request, "ok", ok=True).body, delay=5)
+        result = client.validate_with_offline_fallback(LICENSE_KEY)
+        self.assertTrue(result.ok and result.offline, result)
+        refused = self.make_client(refused_url(), store=store, clock=self.clock)
+        result = refused.validate_with_offline_fallback(LICENSE_KEY)
+        self.assertTrue(result.ok and result.offline, result)
+
+    def test_fallback_rule(self):
+        unavailable = client_module._server_unavailable
+        failure = lambda code, status=None, offline=False: VelsigilResult(  # noqa: E731
+            ok=False, code=code, message="", http_status=status, offline=offline
+        )
+        self.assertTrue(unavailable(failure(Code.NETWORK_ERROR)))
+        self.assertTrue(unavailable(failure(Code.NETWORK_ERROR, 503)))
+        for status in (500, 501, 502, 503, 504, 599):
+            self.assertTrue(unavailable(failure(Code.INTERNAL_ERROR, status)), status)
+        self.assertTrue(unavailable(failure(Code.INVALID_RESPONSE, 503)))
+        for status in (None, 200, 307, 400, 404, 429, 499, 600):
+            self.assertFalse(unavailable(failure(Code.INVALID_RESPONSE, status)), status)
+            self.assertFalse(unavailable(failure(Code.INTERNAL_ERROR, status)), status)
+        self.assertFalse(unavailable(failure(Code.RATE_LIMITED, 429)))
+        self.assertFalse(unavailable(failure(Code.LICENSE_REVOKED, 200)))
+        # A signed answer (always http_status 200) never falls back, whatever code it carries.
+        self.assertFalse(unavailable(failure(Code.NETWORK_ERROR, 200)))
+        self.assertFalse(unavailable(failure(Code.INTERNAL_ERROR, 200)))
+        self.assertFalse(unavailable(failure(Code.LEASE_EXPIRED, offline=True)))
+        self.assertFalse(unavailable(VelsigilResult(ok=True, code=Code.OK, message="", http_status=200)))
 
 
 class DeviceBindingTests(ClientTestCase):

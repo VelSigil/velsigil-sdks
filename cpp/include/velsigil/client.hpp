@@ -33,7 +33,7 @@
 namespace velsigil {
 
 /// SDK version (semantic versioning).
-inline constexpr char kSdkVersion[] = "1.0.2";
+inline constexpr char kSdkVersion[] = "1.0.3";
 
 /// Result codes. Server codes are defined in SPEC section 10.3; the SDK adds a few local ones.
 namespace codes {
@@ -79,16 +79,16 @@ inline constexpr char kUnknownProduct[] = "unknown_product";
 inline constexpr char kPayloadTooLarge[] = "payload_too_large";
 inline constexpr char kUnsupportedMediaType[] = "unsupported_media_type";
 inline constexpr char kRateLimited[] = "rate_limited";
-inline constexpr char kInternalError[] = "internal_error";
+inline constexpr char kInternalError[] = "internal_error";  // server error; an unsigned HTTP 5xx triggers the offline fallback
 
 // SDK-side codes (SPEC section 14; identical names in every Velsigil SDK). kValidationError above is
 // also returned for local argument checks (empty/over-long license key, version > 32, device name > 255).
 inline constexpr char kInvalidResponse[] = "invalid_response";            // unsigned, tampered or mismatched response (incl. wrong `type`)
-inline constexpr char kNetworkError[] = "network_error";                  // no HTTP response (DNS, connect, TLS, timeout) or 502/503/504 without a Velsigil error body
+inline constexpr char kNetworkError[] = "network_error";                  // no HTTP response (DNS, connect, TLS, timeout) or 502/503/504 without a Velsigil error body (triggers the offline fallback)
 inline constexpr char kInvalidConfiguration[] = "invalid_configuration";  // constructor arguments were rejected
 inline constexpr char kNoLease[] = "no_lease";                            // validate_offline(): nothing stored
-inline constexpr char kLeaseExpired[] = "lease_expired";                  // validate_offline(): lease past its exp
-inline constexpr char kLeaseInvalid[] = "lease_invalid";                  // validate_offline(): signature/product/device check failed
+inline constexpr char kLeaseExpired[] = "lease_expired";                  // validate_offline() and the offline fallback: lease past its exp
+inline constexpr char kLeaseInvalid[] = "lease_invalid";                  // validate_offline() and the offline fallback: signature/product/device check failed
 inline constexpr char kPanelTooOld[] = "panel_too_old";                   // start_trial(): the server has no in-app trial endpoint (404 not_found)
 inline constexpr char kAlreadyLicensed[] = "already_licensed";            // start_trial(): refused locally, a device secret or lease is stored (nothing sent)
 inline constexpr char kStoreUnavailable[] = "store_unavailable";          // start_trial(): refused locally, the store could not be read (nothing sent)
@@ -529,7 +529,13 @@ class Client {
   ValidationResult get_download(const std::string& license_key, const std::optional<std::string>& version = std::nullopt);
   /// Validates the stored offline lease without network access (`result.offline == true`).
   ValidationResult validate_offline();
-  /// Online validation first; only when it fails with `network_error` the stored lease is used.
+  /// Online validation first; the stored lease is used only when the server is unavailable: no HTTP response
+  /// (`network_error`) or an unsigned HTTP 5xx whatever its body (`internal_error`, or `network_error` for a
+  /// 502/503/504 without a Velsigil error body), e.g. the server's database is down. Signed answers, 4xx answers
+  /// (`rate_limited`, `validation_error`, ...) and `invalid_response` are returned as they are. When it falls back,
+  /// the result is that of validate_offline() (`offline == true`): `ok` for a usable lease, `lease_expired` /
+  /// `lease_invalid` for a stored lease that cannot be used (it stays stored, as with validate_offline()). Only when
+  /// no lease is stored is the original online result (`network_error` / `internal_error`) returned, not `no_lease`.
   ValidationResult validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& options = {});
 
   /// Downloads a release described by get_download() to `destination` (streamed to a temporary file

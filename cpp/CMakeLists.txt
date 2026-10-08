@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(velsigil
-  VERSION 1.0.2
+  VERSION 1.0.3
   DESCRIPTION "Velsigil license client SDK for C++17"
   LANGUAGES CXX)
 

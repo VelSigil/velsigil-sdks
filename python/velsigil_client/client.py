@@ -61,7 +61,7 @@ from .models import (
 )
 from .store import LicenseStore, MemoryStore, StoredState
 
-SDK_VERSION = "1.0.2"
+SDK_VERSION = "1.0.3"
 
 API_PATH = "/api/client/v1"
 DEFAULT_TIMEOUT = 15.0
@@ -164,7 +164,14 @@ class _NetworkFailure(Exception):
 
 
 class _ResponseTooLarge(Exception):
-    """The response body exceeded :data:`MAX_RESPONSE_BYTES`."""
+    """The response body exceeded :data:`MAX_RESPONSE_BYTES`.
+
+    ``status`` is the HTTP status of that response (``None`` when unknown).
+    """
+
+    def __init__(self, status: Optional[int] = None) -> None:
+        super().__init__()
+        self.status = status
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -586,21 +593,29 @@ class VelsigilClient:
         version: Optional[str] = None,
         device_name: Optional[str] = None,
     ) -> VelsigilResult:
-        """Validate online; only on ``network_error`` fall back to the stored lease.
+        """Validate online; fall back to the stored lease only while the server is unavailable.
 
-        Any other failure (including signed business failures, invalid or
-        unsigned responses and rate limiting) is returned as is.
+        "Unavailable" means no HTTP answer at all (``network_error``: DNS,
+        connect, TLS, timeout, reset) or an unsigned HTTP 5xx answer, whatever
+        its body (a Velsigil error such as ``internal_error`` while the
+        server's database is down, a proxy's HTML error page, an empty or
+        garbled body). Every other answer is returned as is: signed answers
+        (``license_revoked``, ``license_expired``, ...), unsigned 4xx
+        (``rate_limited``, ``validation_error``, ...), redirects and
+        ``invalid_response`` on an HTTP 200. When it falls back, the result is
+        that of :meth:`validate_offline`: ``ok`` (``offline=True``) for a usable
+        lease, ``lease_expired`` or ``lease_invalid`` (``offline=True``) for a
+        stored lease that cannot be used (kept or removed exactly as by
+        :meth:`validate_offline`), and the original online failure
+        (``network_error``, ``internal_error``, ...) when no lease is stored at
+        all, not ``no_lease``. :meth:`validate` itself never falls back.
         """
         online = self.validate(license_key, version=version, device_name=device_name)
-        if online.code != Code.NETWORK_ERROR:
+        if not _server_unavailable(online):
             return online
         offline = self.validate_offline()
-        if offline.ok:
-            return offline
-        return dataclasses.replace(
-            online,
-            message="%s No usable offline lease (%s)." % (online.message, offline.code),
-        )
+        # Without any stored lease the original failure (network_error, internal_error, ...) is more useful.
+        return online if offline.code == Code.NO_LEASE else offline
 
     def clear_stored_state(self) -> None:
         """Forget the stored device secret and offline lease for this product."""
@@ -732,8 +747,10 @@ class VelsigilClient:
             status, raw, headers = self._post(url, data)
         except _NetworkFailure as exc:
             return _failure(Code.NETWORK_ERROR, "Could not reach the license server (%s)." % exc), None
-        except _ResponseTooLarge:
-            return _failure(Code.INVALID_RESPONSE, "The server response is too large."), None
+        except _ResponseTooLarge as exc:
+            # The status is kept: an oversized 5xx (e.g. a proxy error page) is still an unsigned 5xx
+            # answer, which lets validate_with_offline_fallback use the stored lease.
+            return _failure(Code.INVALID_RESPONSE, "The server response is too large.", http_status=exc.status), None
 
         if status != 200:
             return _unsigned_error(status, raw, headers, response_type), None
@@ -781,11 +798,17 @@ class VelsigilClient:
             except urllib.error.HTTPError as err:
                 try:
                     raw = _read_capped(err, deadline) if getattr(err, "fp", None) is not None else b""
+                except _ResponseTooLarge:
+                    raise _ResponseTooLarge(err.code) from None
                 finally:
                     err.close()
                 return err.code, raw, err.headers
             with response:
-                return response.getcode(), _read_capped(response, deadline), response.headers
+                status = response.getcode()
+                try:
+                    return status, _read_capped(response, deadline), response.headers
+                except _ResponseTooLarge:
+                    raise _ResponseTooLarge(status) from None
         except _ResponseTooLarge:
             raise
         except (socket.timeout, TimeoutError):
@@ -943,6 +966,33 @@ class VelsigilClient:
 # --------------------------------------------------------------------------- #
 
 
+def _server_unavailable(result: VelsigilResult) -> bool:
+    """Whether ``result`` says the license server is unavailable (not that it refused the request).
+
+    True for ``network_error`` (no HTTP answer, or a 502/503/504 without a
+    Velsigil error body) and for any other unsigned HTTP 5xx answer
+    (``http_status`` 500-599, whatever its body or code, typically
+    ``internal_error``). Signed answers always arrive with HTTP 200, so a
+    signed denial is never "unavailable"; neither are unsigned 4xx answers
+    (``rate_limited``, ``validation_error``, ...), redirects or
+    ``invalid_response`` on an HTTP 200. These are exactly the results on
+    which :meth:`VelsigilClient.validate_with_offline_fallback` uses the
+    stored offline lease.
+
+    Falling back on an unsigned 5xx gives an attacker on the network nothing
+    new: one who can inject such an answer can as well drop the connection,
+    which already means ``network_error``; and the lease itself is signed,
+    bound to this device and time-limited.
+    """
+    if result.ok or result.offline:
+        return False
+    status = result.http_status
+    if status is None:
+        # No HTTP answer at all (a signed answer always carries http_status 200, so it never gets here).
+        return result.code == Code.NETWORK_ERROR
+    return isinstance(status, int) and 500 <= status <= 599
+
+
 def _unlink_quietly(path: str) -> None:
     try:
         os.unlink(path)
@@ -1024,9 +1074,10 @@ def _code_for_status(status: int, velsigil_body: bool) -> str:
     if status == 429:
         return Code.RATE_LIMITED
     if status in (502, 503, 504):
-        # A gateway in front of Velsigil could not reach it: treat like an
-        # unreachable server (enables the offline fallback) unless Velsigil
-        # itself answered with an error body.
+        # A gateway in front of Velsigil could not reach it: report it like an
+        # unreachable server unless Velsigil itself answered with an error
+        # body. (validate_with_offline_fallback falls back on every unsigned
+        # 5xx either way, see _server_unavailable.)
         return Code.INTERNAL_ERROR if velsigil_body else Code.NETWORK_ERROR
     if 500 <= status <= 599:
         return Code.INTERNAL_ERROR

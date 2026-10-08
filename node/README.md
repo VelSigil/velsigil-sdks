@@ -139,7 +139,7 @@ result instead.
 | `getDownload(licenseKey, version?)` → `Promise<VelsigilResult>` | A short-lived download link in `result.download`. The device must already be activated (`device_not_activated` otherwise). |
 | `downloadRelease(download, destination, { idleTimeout?, signal?, onProgress? })` → `Promise<DownloadFileResult>` | Streams the file and verifies its signed size and SHA-256. The file appears at `destination` only after it passes both checks. |
 | `validateOffline()` → `Promise<VelsigilResult>` | Validates the stored lease without contacting the server. Results have `offline: true`. |
-| `validateWithOfflineFallback(licenseKey, opts?)` → `Promise<VelsigilResult>` | Validates online first. **Only** on `network_error` does it fall back to `validateOffline()`. If no lease is stored, the original `network_error` result is returned. |
+| `validateWithOfflineFallback(licenseKey, opts?)` → `Promise<VelsigilResult>` | Validates online first. **Only** when the server is unavailable (no HTTP response, or an unsigned HTTP 5xx; see [Offline leases](#offline-leases)) does it fall back to `validateOffline()`. If no lease is stored, the original online result (`network_error`, `internal_error`, …) is returned. |
 | `clearStoredState()` → `Promise<void>` | Forgets the device secret and lease for this product, e.g. when the user switches license keys. |
 | `static getHardwareId()` → `string` | This machine's hardware id (see [HWID](#hardware-id)). |
 | `productId`, `hardwareId`, `clockOffset` | Read-only: the normalized product id, the hwid sent to the server, and the learned server-minus-local clock offset in seconds. |
@@ -262,19 +262,20 @@ be spoofed and are not a security boundary; the device secret is what binds a de
 | `unknown_product` | 404 | Wrong product id or server. |
 | `payload_too_large` / `unsupported_media_type` | 413 / 415 | Should not occur with this SDK (also mapped from a bodiless 413/415, e.g. from a proxy). |
 | `rate_limited` | 429 | Too many requests; see `result.retryAfter`. |
-| `internal_error` | 5xx | Server error (also 502/503/504 **with** a Velsigil error body). |
+| `internal_error` | 5xx | Server error (also 502/503/504 **with** a Velsigil error body), for example while the panel is up but its database is down. `validateWithOfflineFallback` falls back to the stored lease. |
 
 The unsigned-error mapping is identical in every Velsigil SDK: a known code in a Velsigil error body
 (`{ "error": { "code": … } }`) wins; otherwise 400 → `validation_error`, 413 → `payload_too_large`,
 415 → `unsupported_media_type`, 429 → `rate_limited`, 502/503/504 → `network_error` without a Velsigil error
-body (a reverse proxy in front of an unreachable server, so the offline fallback applies) or
-`internal_error` with one, other 5xx → `internal_error`, anything else (3xx, 401, …) → `invalid_response`.
+body (a reverse proxy in front of an unreachable server) or `internal_error` with one, other 5xx →
+`internal_error`, anything else (3xx, 401, …) → `invalid_response`. The code only names the failure: the offline
+fallback is decided by the HTTP status and applies to **every** unsigned 5xx, whichever code it maps to.
 
 **SDK codes** (the same names in every Velsigil SDK, SPEC section 14).
 
 | Code | Meaning |
 |---|---|
-| `network_error` | DNS, TCP or TLS failure, connection reset, timeout, or a 502/503/504 gateway error without a Velsigil error body. This is the only code that triggers the offline fallback. |
+| `network_error` | DNS, TCP or TLS failure, connection reset, timeout, or a 502/503/504 gateway error without a Velsigil error body. Triggers the offline fallback, like every other unsigned 5xx (`internal_error`). |
 | `invalid_response` | Bad or missing signature, wrong key, nonce or product mismatch, wrong response `type` for the endpoint, a signed lease or `activation.hwidHash` that belongs to another device (the request was rewritten in transit; nothing from the response is stored), malformed or oversized body, a redirect, an insecure download URL, or an unexpected HTTP status. |
 | `validation_error` | Local argument check failed; nothing was sent. |
 | `invalid_configuration` | `code` of the `VelsigilError` thrown by the constructor. |
@@ -343,7 +344,23 @@ plus `trial: true` for a free-trial license (left out otherwise). Fields the SDK
 - The SDK verifies the token (signature, product, `hwidHash = sha256(hwid)`) before storing it. A `validate` answer whose lease is bound to another device or product is rejected as a whole (`invalid_response`), not silently accepted without the lease.
 - `validateOffline()` accepts it only if the signature verifies with your public key, `typ` is `lease`, the productId matches, the hwid hash matches this device, and `now < exp`. Here `now` is the local clock plus the learned server offset. A lease never outlives the license (`licenseExpiresAt`).
 - The stored lease is **replaced** on every successful validation and **deleted** when a success carries no lease (for example, the seller disabled offline use). It is also deleted on a signed definitive denial: `invalid_key`, `license_expired`, `license_suspended`, `license_revoked`, `license_banned`, `device_revoked`, `device_verification_failed`, `device_limit_reached`, `device_not_activated`, `device_not_found`, `blacklisted` or `product_disabled` (exported as `LEASE_REVOKING_CODES`; the same set in every Velsigil SDK). A successful `deactivate` (or `device_not_found`) clears the lease and the device secret. Other signed failures such as `product_paused`, `outdated_version` or `activation_rate_limited` keep the lease. A revoked license therefore stops working offline as soon as the app talks to the server once.
-- `validateWithOfflineFallback` falls back **only** on `network_error`. Any server answer, including unsigned 4xx/5xx errors, is returned as is.
+- `validateWithOfflineFallback` falls back to the stored lease **only when the server is unavailable**:
+  - no HTTP response at all: DNS, TCP or TLS failure, connection reset, timeout (`network_error`);
+  - an unsigned HTTP **5xx** (500-599), whatever its body: a Velsigil error body (the panel is up but its database is
+    down: 500 `internal_error`, 503 `service_busy`, or an empty 503 with `Retry-After`), a gateway's HTML page (IIS ARR,
+    Caddy or nginx answering 502/503/504 because the app is down or too slow), an empty, non-JSON or oversized body.
+    `validate()` still reports these as they are (`internal_error`, or `network_error` for a 502/503/504 without a
+    Velsigil error body; `invalid_response` for an oversized body).
+
+  Everything else is final and returned as is, even when a valid lease is stored: every signed answer (denials such
+  as `license_revoked`, `license_expired`, `device_revoked`, but also `product_paused` or `clock_skew`), 4xx errors
+  (`rate_limited` with `retryAfter`, `validation_error`, `ip_blocked`, `unknown_product`, …), redirects and
+  `invalid_response` (for example a bad signature). When the fallback runs but finds no usable lease, the result is
+  `lease_expired` (the stored lease expired) or `lease_invalid` (it failed verification and was deleted), and the
+  original online result when no lease is stored. Plain `validate()` never falls back.
+
+  Falling back on an unsigned 5xx grants an attacker nothing: whoever can inject one can just as well drop the
+  connection, which falls back too, and the lease itself is signed, bound to this device and expires.
 - **Limitation:** offline checks rely on the local clock. A user who sets the clock back can extend a lease. Keep `offlineLeaseHours` as short as your users can tolerate, and validate online whenever possible.
 
 ## Device secret persistence
@@ -431,7 +448,8 @@ The test suite runs a local HTTP server that signs responses with the vector key
 (`keys.privateSeedBase64`). It covers success, business failures, nonce and product mismatches, bad
 signatures, tampered data, `clock_skew` with a single retry, device secret persistence and re-sending,
 HTTP 400/403/404/429/500/502, redirects, oversized bodies, timeouts, refused and reset connections, and
-offline fallback with a fake clock.
+offline fallback with a fake clock (on transport failures and on unsigned 5xx such as a 500 `internal_error`, an
+empty 503, an HTML 502 or an empty 504; never on 4xx, signed answers or bad signatures).
 
 Before a release the dist build is also run against a **real** Velsigil server: activation,
 device-secret persistence, offline lease, updates, verified download, clock skew, replay, suspension,

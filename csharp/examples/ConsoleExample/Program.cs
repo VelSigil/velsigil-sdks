@@ -186,6 +186,10 @@ internal static class Program
                 case ResultCodes.LeaseExpired:
                     Console.WriteLine("The license server is unreachable; connect to the internet and try again.");
                     break;
+                case ResultCodes.InternalError:
+                    // An unsigned 5xx (the server is temporarily unavailable) and no offline lease is stored.
+                    Console.WriteLine("The license server is temporarily unavailable; try again later.");
+                    break;
                 case ResultCodes.InvalidResponse:
                     Console.WriteLine("The server response could not be verified (proxy or tampering?).");
                     break;

@@ -50,7 +50,9 @@ export const UNSIGNED_ERROR_CODES = [
  * - `invalid_response`: unsigned 200, bad signature, nonce/productId/type mismatch, malformed payload,
  *   redirect or oversized response;
  * - `network_error`: no HTTP response (DNS, connect, TLS, timeout, reset) or a 502/503/504 without a
- *   Velsigil error body (a proxy in front of an unreachable server), so the offline fallback applies;
+ *   Velsigil error body (a proxy in front of an unreachable server), so the offline fallback applies. The fallback
+ *   ({@link VelsigilClient.validateWithOfflineFallback}) also applies to every other unsigned HTTP 5xx, which
+ *   `validate` reports as `internal_error` (or the code of its Velsigil error body);
  * - `validation_error`: local argument checks (the request is never sent);
  * - `invalid_configuration`: the code of {@link VelsigilError} thrown by the constructor;
  * - `no_lease` / `lease_expired` / `lease_invalid`: offline validation;

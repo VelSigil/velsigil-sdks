@@ -14,6 +14,10 @@ GET /files/<name> for release downloads. The scenario is selected by the license
   VX-429      unsigned 429 rate_limited (with Retry-After)
   VX-400      unsigned 400 validation_error
   VX-500      unsigned 500 internal_error
+  VX-503      503 with an empty body and Retry-After (the server while its database is unreachable)
+  VX-503J     unsigned 503 service_busy with Retry-After (a busy database)
+  VX-502      502 with an HTML body (a reverse proxy whose app is down)
+  VX-504      504 with an empty body (a gateway timeout)
   VX-SLOW     answers after 3 seconds (client timeouts)
   VX-DLBAD    download descriptor whose sha256 does not match the served file
 
@@ -130,11 +134,12 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     # -- helpers --------------------------------------------------------------------------------
-    def send_body(self, status: int, body: bytes, content_type: str = "application/json",
+    def send_body(self, status: int, body: bytes, content_type: Optional[str] = "application/json",
                   extra: Optional[Dict[str, str]] = None) -> None:
         try:
             self.send_response(status)
-            self.send_header("Content-Type", content_type)
+            if content_type is not None:
+                self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             for name, value in (extra or {}).items():
@@ -202,6 +207,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if key == "VX-500":
             self.send_error_body(500, "internal_error", "Internal server error.")
+            return
+        if key == "VX-503":
+            self.send_body(503, b"", None, {"Retry-After": "30"})
+            return
+        if key == "VX-503J":
+            self.send_error_body(503, "service_busy", "The service is busy. Please try again shortly.", {"Retry-After": "5"})
+            return
+        if key == "VX-502":
+            self.send_body(502, b"<html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1></body></html>",
+                           "text/html")
+            return
+        if key == "VX-504":
+            self.send_body(504, b"", None)
             return
         if key == "VX-SLOW":
             time.sleep(3)

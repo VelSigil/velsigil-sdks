@@ -85,7 +85,8 @@ try {
   throw error;
 }
 
-// Online validation; falls back to the stored offline lease ONLY if the server is unreachable.
+// Online validation; falls back to the stored offline lease ONLY if the server is unavailable
+// (no HTTP response, or an unsigned HTTP 5xx such as a database outage or a gateway's 502/503/504).
 const result = await client.validateWithOfflineFallback(licenseKey, {
   version: APP_VERSION,
   deviceName: hostname(),

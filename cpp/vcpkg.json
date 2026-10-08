@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "$comment": "builtin-baseline is the microsoft/vcpkg commit of release tag 2026.07.29 (curl 8.21.0, libsodium 1.0.22, nlohmann-json 3.12.0); CI clones vcpkg at exactly this commit, so update both deliberately. libsodium 1.0.21+ carries the Ed25519 input-validation fix (GHSA-mrfv-m5wm-5w6w).",
   "name": "velsigil-client",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "C++17 client SDK for the Velsigil license server (signed responses, offline leases, device binding).",
   "homepage": "https://github.com/VelSigil/velsigil-sdks",
   "license": "MIT",

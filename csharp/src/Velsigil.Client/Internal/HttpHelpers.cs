@@ -57,8 +57,9 @@ internal static class HttpHelpers
     /// Maps a non-200 response to a failure code (SPEC section 14, identical in every Velsigil SDK). A
     /// recognised code in a Velsigil error body (<c>{"error":{"code":…}}</c>) wins; otherwise the HTTP status
     /// decides. Gateway errors without a Velsigil error body (502/503/504, typically a reverse proxy while the
-    /// server is down) count as <see cref="ResultCodes.NetworkError"/> so the offline fallback applies; with a
-    /// Velsigil error body they are <see cref="ResultCodes.InternalError"/>.
+    /// server is down) count as <see cref="ResultCodes.NetworkError"/>; with a Velsigil error body they are
+    /// <see cref="ResultCodes.InternalError"/>. The offline fallback does not depend on this code: it applies to every
+    /// unsigned 5xx (VelsigilClient.IsServerUnavailable), so this mapping (what <c>ValidateAsync</c> reports) is unchanged.
     /// </summary>
     /// <param name="status">The HTTP status.</param>
     /// <param name="body">The (bounded) response body.</param>

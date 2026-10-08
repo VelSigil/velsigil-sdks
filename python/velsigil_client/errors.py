@@ -57,6 +57,9 @@ class Code:
     IP_BLOCKED = "ip_blocked"
     UNKNOWN_PRODUCT = "unknown_product"
     RATE_LIMITED = "rate_limited"
+    #: Unsigned 5xx (also 502/503/504 with a Velsigil error body, e.g. while
+    #: the server's database is down). On any unsigned 5xx (``http_status``
+    #: 500-599) ``validate_with_offline_fallback`` uses the stored lease.
     INTERNAL_ERROR = "internal_error"
     PAYLOAD_TOO_LARGE = "payload_too_large"
     UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
@@ -66,9 +69,13 @@ class Code:
     #: another device, malformed or oversized response, redirect.
     INVALID_RESPONSE = "invalid_response"
     #: No HTTP response (DNS, connect, TLS, timeout) or a 502/503/504 without a Velsigil error body.
+    #: ``validate_with_offline_fallback`` uses the stored lease on it and on any other unsigned 5xx.
     NETWORK_ERROR = "network_error"
     #: :class:`ConfigurationError` code (constructor arguments rejected).
     INVALID_CONFIGURATION = "invalid_configuration"
+    #: ``validate_offline`` codes. ``validate_with_offline_fallback`` returns ``lease_expired`` /
+    #: ``lease_invalid`` when it falls back to an unusable stored lease; with no lease stored it
+    #: returns the original online failure instead of ``no_lease``.
     NO_LEASE = "no_lease"
     LEASE_EXPIRED = "lease_expired"
     LEASE_INVALID = "lease_invalid"

@@ -24,6 +24,7 @@ import {
 import {
   makeLease,
   MockServer,
+  type MockHandler,
   type MockReply,
   payloadFor,
   PRODUCT_ID,
@@ -799,7 +800,7 @@ describe('offline leases', () => {
     });
   }
 
-  it('stores the lease from a successful validation and falls back to it on network errors only', async () => {
+  it('stores the lease from a successful validation and falls back to it while the server is unreachable', async () => {
     let nowMs = T0 * 1000;
     const store = new MemoryStore();
     const client = makeClient({ store, clock: () => nowMs });
@@ -853,15 +854,17 @@ describe('offline leases', () => {
     expect(afterwards.code).toBe('network_error');
   });
 
-  it('does not fall back on unsigned server errors', async () => {
+  it('falls back on unsigned server errors (the panel is up, its database is down)', async () => {
     const nowMs = T0 * 1000;
     const client = makeClient({ clock: () => nowMs });
     server.handler = leaseHandler(T0 + 3600);
     await client.validate(LICENSE_KEY);
     server.handler = () => ({ kind: 'json', status: 500, body: { error: { code: 'internal_error' } } });
+    // validate() still reports the real error ...
+    expect((await client.validate(LICENSE_KEY)).code).toBe('internal_error');
+    // ... while the fallback keeps the app working on the stored lease.
     const result = await client.validateWithOfflineFallback(LICENSE_KEY);
-    expect(result.code).toBe('internal_error');
-    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ ok: true, code: 'ok', offline: true });
   });
 
   it('removes the stored lease when a later success carries none', async () => {
@@ -1065,6 +1068,235 @@ describe('offline leases', () => {
       });
       expect((await client.validate(LICENSE_KEY)).code).toBe(code);
       expect((await client.validateOffline()).code).toBe('no_lease');
+    }
+  });
+});
+
+// The license server is unavailable while something still answers HTTP: the Velsigil app is up but its database is
+// down (500 internal_error, 503 service_busy, or an empty 503 with Retry-After), or the app is down behind IIS ARR /
+// Caddy (502/503/504, often an HTML page). validateWithOfflineFallback treats every unsigned 5xx like a failed
+// connection; signed answers, 4xx, redirects and invalid_response stay final.
+describe('offline fallback when the server is unavailable (unsigned 5xx)', () => {
+  const LEASE_EXP = T0 + 3600;
+  const LEASE_LICENSE_ID = '5d2c8e4a-3f1b-4c6d-9e8f-0a1b2c3d4e5f';
+
+  function validLease(key?: KeyObject): string {
+    return makeLease({ iat: T0, exp: LEASE_EXP, licenseExpiresAt: T0 + 30 * 86_400 }, key);
+  }
+
+  /** A client at `nowS` whose store holds this device's secret and `lease` (nothing when null). */
+  function clientWithLease(lease: string | null, nowS = T0 + 600): { client: VelsigilClient; store: MemoryStore } {
+    const store = new MemoryStore();
+    if (lease !== null) store.save(PRODUCT_ID, { deviceSecret: SECRET_1, lease: { token: lease, expiresAt: LEASE_EXP } });
+    return { store, client: makeClient({ store, clock: () => nowS * 1000 }) };
+  }
+
+  /** [description, reply, the code plain validate() reports for it (unchanged)]. */
+  const unavailable: Array<[string, MockReply, string]> = [
+    [
+      '500 with a Velsigil internal_error body',
+      {
+        kind: 'json',
+        status: 500,
+        body: { error: { code: 'internal_error', message: 'An unexpected error occurred.', requestId: 'req-500' } },
+      },
+      'internal_error',
+    ],
+    [
+      '503 with an empty body and Retry-After',
+      { kind: 'raw', status: 503, body: '', headers: { 'retry-after': '30', 'content-length': '0' } },
+      'network_error',
+    ],
+    [
+      '502 with an HTML page',
+      {
+        kind: 'raw',
+        status: 502,
+        body: '<html><head><title>502 Bad Gateway</title></head><body><h1>Bad Gateway</h1></body></html>',
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      },
+      'network_error',
+    ],
+    ['504 with an empty body', { kind: 'raw', status: 504, body: '' }, 'network_error'],
+    [
+      '503 with the Velsigil service_busy body',
+      {
+        kind: 'json',
+        status: 503,
+        body: { error: { code: 'service_busy', message: 'The service is busy.' } },
+        headers: { 'retry-after': '5' },
+      },
+      'internal_error',
+    ],
+    [
+      '500 with an HTML page',
+      { kind: 'raw', status: 500, body: '<html>Internal Server Error</html>', headers: { 'content-type': 'text/html' } },
+      'internal_error',
+    ],
+    [
+      '500 with a garbled body',
+      { kind: 'raw', status: 500, body: Buffer.from([0xff, 0xfe, 0x00, 0x7b, 0x22]), headers: { 'content-type': 'application/json' } },
+      'internal_error',
+    ],
+    ['500 with an empty body', { kind: 'raw', status: 500, body: '' }, 'internal_error'],
+    ['501 with an empty body', { kind: 'raw', status: 501, body: '' }, 'internal_error'],
+    ['599 with an empty body', { kind: 'raw', status: 599, body: '' }, 'internal_error'],
+  ];
+
+  for (const [description, reply, reported] of unavailable) {
+    describe(description, () => {
+      beforeEach(() => {
+        server.handler = () => reply;
+      });
+
+      it(`plain validate() still reports ${reported}`, async () => {
+        const { client, store } = clientWithLease(validLease());
+        const result = await client.validate(LICENSE_KEY);
+        expect(result).toMatchObject({ ok: false, code: reported, offline: false, license: null });
+        // An unsigned error keeps the stored lease.
+        expect(store.load(PRODUCT_ID)?.lease?.expiresAt).toBe(LEASE_EXP);
+      });
+
+      it('falls back to a valid stored lease', async () => {
+        const { client, store } = clientWithLease(validLease());
+        const result = await client.validateWithOfflineFallback(LICENSE_KEY);
+        expect(result).toMatchObject({ ok: true, code: 'ok', offline: true, type: 'validate' });
+        expect(result.license?.id).toBe(LEASE_LICENSE_ID);
+        expect(result.hasFeature('pro')).toBe(true);
+        expect(result.lease?.expiresAt).toBe(LEASE_EXP);
+        expect(server.requests).toHaveLength(1); // no retry
+        expect(store.load(PRODUCT_ID)).toMatchObject({ deviceSecret: SECRET_1, lease: { expiresAt: LEASE_EXP } });
+      });
+
+      it('returns the original error when no lease is stored', async () => {
+        const { client } = clientWithLease(null);
+        const result = await client.validateWithOfflineFallback(LICENSE_KEY);
+        expect(result).toMatchObject({ ok: false, code: reported, offline: false, license: null });
+      });
+
+      it('returns lease_expired for an expired stored lease', async () => {
+        const { client } = clientWithLease(validLease(), LEASE_EXP);
+        const result = await client.validateWithOfflineFallback(LICENSE_KEY);
+        expect(result).toMatchObject({ ok: false, code: 'lease_expired', offline: true });
+        expect(result.hasFeature('pro')).toBe(false);
+      });
+    });
+  }
+
+  it('keeps the Velsigil requestId of the original error when no lease is stored', async () => {
+    server.handler = () => unavailable[0]![1];
+    const result = await clientWithLease(null).client.validateWithOfflineFallback(LICENSE_KEY);
+    expect(result).toMatchObject({ code: 'internal_error', requestId: 'req-500' });
+  });
+
+  it('returns lease_invalid (and drops the lease) for a stored lease that fails verification', async () => {
+    server.handler = () => ({ kind: 'raw', status: 503, body: '', headers: { 'retry-after': '30' } });
+    const { client, store } = clientWithLease(validLease(WRONG_KEY));
+    const result = await client.validateWithOfflineFallback(LICENSE_KEY);
+    expect(result).toMatchObject({ ok: false, code: 'lease_invalid', offline: true });
+    expect(store.load(PRODUCT_ID)?.lease ?? null).toBeNull();
+  });
+
+  it('falls back on a 5xx whose body exceeds maxResponseBytes', async () => {
+    server.handler = () => ({ kind: 'raw', status: 503, body: `<html>${'x'.repeat(8 * 1024)}</html>` });
+    const store = new MemoryStore();
+    store.save(PRODUCT_ID, { deviceSecret: SECRET_1, lease: { token: validLease(), expiresAt: LEASE_EXP } });
+    const client = makeClient({ store, clock: () => (T0 + 600) * 1000, maxResponseBytes: 4096 });
+    expect((await client.validate(LICENSE_KEY)).code).toBe('invalid_response');
+    expect(await client.validateWithOfflineFallback(LICENSE_KEY)).toMatchObject({ ok: true, offline: true });
+    await client.clearStoredState();
+    expect((await client.validateWithOfflineFallback(LICENSE_KEY)).code).toBe('invalid_response');
+  });
+
+  it('falls back on a timeout, a refused connection and a connection reset (network_error)', async () => {
+    const clock = () => (T0 + 600) * 1000;
+    const storeWithLease = () => {
+      const store = new MemoryStore();
+      store.save(PRODUCT_ID, { deviceSecret: SECRET_1, lease: { token: validLease(), expiresAt: LEASE_EXP } });
+      return store;
+    };
+    server.handler = () => ({ kind: 'hang' });
+    const timedOut = makeClient({ store: storeWithLease(), clock, timeout: 300 });
+    expect((await timedOut.validate(LICENSE_KEY)).code).toBe('network_error');
+    expect(await timedOut.validateWithOfflineFallback(LICENSE_KEY)).toMatchObject({ ok: true, code: 'ok', offline: true });
+    server.handler = () => ({ kind: 'destroy' });
+    expect(await makeClient({ store: storeWithLease(), clock }).validateWithOfflineFallback(LICENSE_KEY)).toMatchObject({
+      ok: true,
+      offline: true,
+    });
+    const refused = makeClient({ store: storeWithLease(), clock }, `http://127.0.0.1:${await closedPort()}`);
+    expect(await refused.validateWithOfflineFallback(LICENSE_KEY)).toMatchObject({ ok: true, offline: true });
+    // Nothing stored: the original transport failure.
+    const bare = makeClient({ clock }, `http://127.0.0.1:${await closedPort()}`);
+    expect(await bare.validateWithOfflineFallback(LICENSE_KEY)).toMatchObject({ ok: false, code: 'network_error', offline: false });
+  });
+
+  it('never takes a signed body on a 5xx for an answer: the lease or the original error', async () => {
+    server.handler = (request) => ({ kind: 'signed', status: 500, payload: payloadFor(request) });
+    const withLease = await clientWithLease(validLease()).client.validateWithOfflineFallback(LICENSE_KEY);
+    expect(withLease).toMatchObject({ ok: true, offline: true });
+    const without = await clientWithLease(null).client.validateWithOfflineFallback(LICENSE_KEY);
+    expect(without).toMatchObject({ ok: false, code: 'internal_error', offline: false, license: null });
+  });
+
+  // Final answers: never replaced by the lease, even though a valid one is stored.
+  it('does not fall back on 429 rate_limited (keeps Retry-After)', async () => {
+    server.handler = () => ({
+      kind: 'json',
+      status: 429,
+      body: { error: { code: 'rate_limited', message: 'Slow down' } },
+      headers: { 'retry-after': '30' },
+    });
+    const { client, store } = clientWithLease(validLease());
+    const result = await client.validateWithOfflineFallback(LICENSE_KEY);
+    expect(result).toMatchObject({ ok: false, code: 'rate_limited', offline: false, retryAfter: 30 });
+    expect(store.load(PRODUCT_ID)?.lease?.expiresAt).toBe(LEASE_EXP);
+  });
+
+  it('does not fall back on 400 validation_error', async () => {
+    server.handler = () => ({ kind: 'json', status: 400, body: { error: { code: 'validation_error', message: 'Bad' } } });
+    const result = await clientWithLease(validLease()).client.validateWithOfflineFallback(LICENSE_KEY);
+    expect(result).toMatchObject({ ok: false, code: 'validation_error', offline: false });
+  });
+
+  it('does not fall back on other 4xx, whatever the body says', async () => {
+    const replies: Array<[MockReply, string]> = [
+      [{ kind: 'json', status: 404, body: { error: { code: 'unknown_product', message: 'Unknown' } } }, 'unknown_product'],
+      [{ kind: 'json', status: 403, body: { error: { code: 'ip_blocked', message: 'Blocked' } } }, 'ip_blocked'],
+      [{ kind: 'raw', status: 404, body: '<html>Not found</html>' }, 'invalid_response'],
+      // The decision is made on the HTTP status, never on the unsigned body's code.
+      [{ kind: 'json', status: 400, body: { error: { code: 'internal_error', message: 'x' } } }, 'internal_error'],
+    ];
+    for (const [reply, code] of replies) {
+      server.handler = () => reply;
+      const result = await clientWithLease(validLease()).client.validateWithOfflineFallback(LICENSE_KEY);
+      expect(result).toMatchObject({ ok: false, code, offline: false });
+    }
+  });
+
+  it('does not fall back on a signed revocation (and drops the lease)', async () => {
+    server.handler = (request) => ({
+      kind: 'signed',
+      payload: payloadFor(request, { ok: false, code: 'license_revoked', message: 'Revoked.', activation: null }),
+    });
+    const { client, store } = clientWithLease(validLease());
+    const result = await client.validateWithOfflineFallback(LICENSE_KEY);
+    expect(result).toMatchObject({ ok: false, code: 'license_revoked', offline: false });
+    expect(store.load(PRODUCT_ID)?.lease ?? null).toBeNull();
+  });
+
+  it('does not fall back on a bad signature or a redirect (invalid_response)', async () => {
+    const replies: Array<MockHandler> = [
+      (request) => ({ kind: 'signed', payload: payloadFor(request), key: WRONG_KEY }),
+      () => ({ kind: 'raw', status: 200, body: '<html>captive portal</html>' }),
+      () => ({ kind: 'raw', status: 302, body: '', headers: { location: 'https://evil.example.com/' } }),
+    ];
+    for (const handler of replies) {
+      server.handler = handler;
+      const { client, store } = clientWithLease(validLease());
+      const result = await client.validateWithOfflineFallback(LICENSE_KEY);
+      expect(result).toMatchObject({ ok: false, code: 'invalid_response', offline: false });
+      expect(store.load(PRODUCT_ID)?.lease?.expiresAt).toBe(LEASE_EXP);
     }
   });
 });

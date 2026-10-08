@@ -94,6 +94,33 @@ void run(const Setup& setup) {
   const auto fallback = offline.validate_with_offline_fallback("VX-OK");
   check(fallback.ok && fallback.offline && fallback.has_feature("pro"), "offline fallback with the stored lease");
 
+  // The server answers but is unavailable (its database is down) or a gateway cannot reach it: every unsigned
+  // 5xx, whatever its body (Velsigil error, HTML, empty), falls back too. validate() reports the real error, and
+  // without a lease the fallback returns that error. 4xx answers never fall back.
+  velsigil::Client degraded = make_client(setup, setup.base_url, "http-test-hwid-0001", store);
+  struct Outage {
+    const char* key;
+    const char* code;
+  };
+  for (const Outage& outage : {Outage{"VX-500", "internal_error"}, Outage{"VX-503", "network_error"},
+                               Outage{"VX-503J", "internal_error"}, Outage{"VX-502", "network_error"},
+                               Outage{"VX-504", "network_error"}}) {
+    const std::string key = outage.key;
+    check_code(degraded.validate(key), outage.code, key + ": validate() reports the outage");
+    const auto result = degraded.validate_with_offline_fallback(key);
+    check(result.ok && result.offline && result.has_feature("pro"), key + ": offline fallback with the stored lease");
+    const auto no_lease = failing.validate_with_offline_fallback(key);
+    check(!no_lease.offline, key + " without a lease: no offline result");
+    check_code(no_lease, outage.code, key + " without a lease: the original error");
+  }
+  const auto limited = degraded.validate_with_offline_fallback("VX-429");
+  check(!limited.offline, "HTTP 429 never falls back");
+  check_code(limited, "rate_limited", "HTTP 429 with a stored lease");
+  const auto bad_request = degraded.validate_with_offline_fallback("VX-400");
+  check(!bad_request.offline, "HTTP 400 never falls back");
+  check_code(bad_request, "validation_error", "HTTP 400 with a stored lease");
+  check(store->get(kProduct, velsigil::store_keys::kLease).has_value(), "outages keep the stored lease");
+
   // Updates.
   const auto update = client.check_update("1.0.0");
   check(update.ok && update.update && update.update->update_available && update.update->latest_version == "1.4.0", "update available");

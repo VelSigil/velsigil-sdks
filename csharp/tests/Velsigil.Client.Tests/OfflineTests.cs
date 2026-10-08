@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Velsigil.Client.Storage;
 using Velsigil.Client.Tests.Infrastructure;
@@ -127,6 +128,224 @@ public class OfflineTests
         Assert.False(result.Offline);
         Assert.Equal(ResultCodes.NetworkError, result.Code);
         Assert.Null(result.LeaseStatus);
+    }
+
+    // ---- Server unavailable: every unsigned 5xx falls back like a network error (1.0.3) -----------------
+
+    /// <summary>
+    /// Unsigned 5xx answers of a license server that cannot decide: the app is up but its database is not (500 / 503
+    /// with a Velsigil error body, or the empty 503 of a newer server), the app is down behind IIS ARR / Caddy (502
+    /// HTML), a gateway timeout (504), and odd bodies.
+    /// </summary>
+    private static HttpResponseMessage Unavailable(string kind) => kind switch
+    {
+        "500-json" => Responses.Error(500, "internal_error"),
+        "503-json-busy" => Responses.Error(503, "service_busy", headers: new[] { ("Retry-After", "5") }),
+        "503-empty" => Responses.Empty(503, ("Retry-After", "30")),
+        "502-html" => Responses.Text(502, "<html><head><title>502 Bad Gateway</title></head><body>Bad Gateway</body></html>"),
+        "504-empty" => Responses.Empty(504),
+        "500-empty" => Responses.Empty(500),
+        "500-garbled" => Responses.Text(500, "{\"error\":{\"code\":\"internal_err", "application/json"),
+        "501-html" => Responses.Text(501, "<html>Not Implemented</html>"),
+        "599-text" => Responses.Text(599, "Network connect timeout error", "text/plain"),
+        "503-json-rate-limited" => Responses.Error(503, "rate_limited"), // the status decides, not the body's code
+        "503-oversized" => Responses.Text(503, new string('x', 70 * 1024)), // over the 64 KB error-body cap
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+    };
+
+    [Theory]
+    [InlineData("500-json", 500, "internal_error")]
+    [InlineData("503-json-busy", 503, "internal_error")]
+    [InlineData("503-empty", 503, "network_error")]
+    [InlineData("502-html", 502, "network_error")]
+    [InlineData("504-empty", 504, "network_error")]
+    [InlineData("500-empty", 500, "internal_error")]
+    [InlineData("500-garbled", 500, "internal_error")]
+    [InlineData("501-html", 501, "internal_error")]
+    [InlineData("599-text", 599, "internal_error")]
+    [InlineData("503-json-rate-limited", 503, "rate_limited")]
+    [InlineData("503-oversized", 503, "network_error")]
+    public async Task Fallback_uses_the_stored_lease_when_the_server_answers_an_unsigned_5xx(string kind, int status, string onlineCode)
+    {
+        var server = new MockServer();
+        server.Respond(_ => Unavailable(kind));
+        var store = new MemoryStore();
+        store.SetLeaseToken(Vectors.ProductId, Vectors.ValidLeaseToken);
+        store.SetDeviceSecret(Vectors.ProductId, Payloads.DeviceSecret);
+        using var client = TestClients.Create(server, store, new FakeClock(Payloads.ServerTime + 60));
+
+        // ValidateAsync is unchanged: it reports the real error and never falls back.
+        var online = await client.ValidateAsync(Key);
+        Assert.False(online.Ok);
+        Assert.False(online.Offline);
+        Assert.False(online.Verified);
+        Assert.Equal(onlineCode, online.Code);
+        Assert.Equal(status, online.HttpStatus);
+
+        var result = await client.ValidateWithOfflineFallbackAsync(Key);
+
+        Assert.True(result.Ok);
+        Assert.True(result.Offline);
+        Assert.True(result.Verified);
+        Assert.Equal(ResultCodes.Ok, result.Code);
+        Assert.Equal(LeaseStatus.Valid, result.LeaseStatus);
+        Assert.True(result.HasFeature("pro"));
+        Assert.Equal(2, server.Requests.Count); // one online attempt per call, no retry
+        // An unsigned answer never touches the stored state.
+        Assert.Equal(Vectors.ValidLeaseToken, store.GetLeaseToken(Vectors.ProductId));
+        Assert.Equal(Payloads.DeviceSecret, store.GetDeviceSecret(Vectors.ProductId));
+    }
+
+    [Theory]
+    [InlineData("500-json", 500, "internal_error")]
+    [InlineData("503-json-busy", 503, "internal_error")]
+    [InlineData("503-empty", 503, "network_error")]
+    [InlineData("502-html", 502, "network_error")]
+    [InlineData("504-empty", 504, "network_error")]
+    [InlineData("500-garbled", 500, "internal_error")]
+    public async Task Fallback_without_a_stored_lease_returns_the_original_5xx_error(string kind, int status, string expected)
+    {
+        var server = new MockServer();
+        server.Respond(_ => Unavailable(kind));
+        using var client = TestClients.Create(server, new MemoryStore(), new FakeClock(Payloads.ServerTime + 60));
+
+        var result = await client.ValidateWithOfflineFallbackAsync(Key);
+
+        Assert.False(result.Ok);
+        Assert.False(result.Offline);
+        Assert.False(result.Verified);
+        Assert.Equal(expected, result.Code);
+        Assert.Equal(status, result.HttpStatus);
+        Assert.Null(result.LeaseStatus);
+        // The request id of a Velsigil error body is kept (quote it to support).
+        Assert.Equal(kind.Contains("-json", StringComparison.Ordinal) ? "11111111-2222-4333-8444-555555555555" : null, result.RequestId);
+    }
+
+    [Theory]
+    [InlineData("500-json")]
+    [InlineData("503-empty")]
+    [InlineData("502-html")]
+    [InlineData("504-empty")]
+    public async Task Fallback_with_an_expired_lease_returns_lease_expired(string kind)
+    {
+        var server = new MockServer();
+        server.Respond(_ => Unavailable(kind));
+        var store = new MemoryStore();
+        store.SetLeaseToken(Vectors.ProductId, Vectors.ValidLeaseToken);
+        using var client = TestClients.Create(server, store, new FakeClock(Vectors.LeaseExpiresAt));
+
+        var result = await client.ValidateWithOfflineFallbackAsync(Key);
+
+        Assert.False(result.Ok);
+        Assert.True(result.Offline);
+        Assert.Equal(ResultCodes.LeaseExpired, result.Code);
+        Assert.Equal(LeaseStatus.Expired, result.LeaseStatus);
+        Assert.False(result.HasFeature("pro"));
+    }
+
+    [Theory]
+    [InlineData("500-json")]
+    [InlineData("503-empty")]
+    public async Task Fallback_with_an_unusable_lease_returns_lease_invalid(string kind)
+    {
+        var server = new MockServer();
+        server.Respond(_ => Unavailable(kind));
+        var store = new MemoryStore();
+        store.SetLeaseToken(Vectors.ProductId, "not-a-lease-token");
+        using var client = TestClients.Create(server, store, new FakeClock(Payloads.ServerTime + 60));
+
+        var result = await client.ValidateWithOfflineFallbackAsync(Key);
+
+        Assert.False(result.Ok);
+        Assert.True(result.Offline);
+        Assert.Equal(ResultCodes.LeaseInvalid, result.Code);
+        Assert.False(result.Verified);
+    }
+
+    [Theory]
+    [InlineData("429", "rate_limited", 429)]
+    [InlineData("400", "validation_error", 400)]
+    [InlineData("400-internal-error-body", "internal_error", 400)] // a 4xx stays final whatever code its body carries
+    [InlineData("404-html", "invalid_response", 404)]
+    [InlineData("200-html", "invalid_response", 200)]               // a proxy page with status 200 is not "unavailable"
+    [InlineData("bad-signature", "invalid_response", 200)]
+    [InlineData("signed-revoked", "license_revoked", 200)]
+    [InlineData("signed-expired", "license_expired", 200)]
+    [InlineData("signed-paused", "product_paused", 200)]
+    public async Task Fallback_is_not_used_for_final_answers(string kind, string expected, int status)
+    {
+        var server = new MockServer();
+        server.Respond(r => kind switch
+        {
+            "429" => Responses.Error(429, "rate_limited", headers: new[] { ("Retry-After", "12") }),
+            "400" => Responses.Error(400, "validation_error"),
+            "400-internal-error-body" => Responses.Error(400, "internal_error"),
+            "404-html" => Responses.Text(404, "<html>Not Found</html>"),
+            "200-html" => Responses.Text(200, "<html>Maintenance</html>"),
+            "bad-signature" => Responses.Signed(Payloads.ValidateOk(r), TestSigner.Wrong),
+            "signed-revoked" => Responses.Signed(Payloads.Base(r, false, "license_revoked", "Revoked.")),
+            "signed-expired" => Responses.Signed(Payloads.Base(r, false, "license_expired", "Expired.")),
+            "signed-paused" => Responses.Signed(Payloads.Base(r, false, "product_paused", "Paused.")),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+        });
+        var store = new MemoryStore();
+        store.SetLeaseToken(Vectors.ProductId, Vectors.ValidLeaseToken);
+        using var client = TestClients.Create(server, store, new FakeClock(Payloads.ServerTime + 60));
+
+        var result = await client.ValidateWithOfflineFallbackAsync(Key);
+
+        Assert.False(result.Ok);
+        Assert.False(result.Offline);
+        Assert.Equal(expected, result.Code);
+        Assert.Equal(status, result.HttpStatus);
+        Assert.Null(result.LeaseStatus);
+        Assert.Equal(kind == "429" ? TimeSpan.FromSeconds(12) : (TimeSpan?)null, result.RetryAfter);
+        // Revoking signed denials delete the lease; every other final answer keeps it for a later outage.
+        var revokes = kind == "signed-revoked" || kind == "signed-expired";
+        Assert.Equal(revokes ? null : Vectors.ValidLeaseToken, store.GetLeaseToken(Vectors.ProductId));
+    }
+
+    [Fact]
+    public async Task Fallback_applies_to_a_client_side_timeout()
+    {
+        var server = new MockServer
+        {
+            Handler = async (_, ct) =>
+            {
+                await Task.Delay(Timeout.Infinite, ct);
+                throw new InvalidOperationException("unreachable");
+            },
+        };
+        var store = new MemoryStore();
+        store.SetLeaseToken(Vectors.ProductId, Vectors.ValidLeaseToken);
+        using var client = TestClients.Create(server, store, new FakeClock(Payloads.ServerTime + 60), timeout: TimeSpan.FromSeconds(1));
+
+        var result = await client.ValidateWithOfflineFallbackAsync(Key);
+
+        Assert.True(result.Ok);
+        Assert.True(result.Offline);
+    }
+
+    [Theory]
+    [InlineData("503-empty", "network_error")] // what a server answers while its database is unreachable
+    [InlineData("500-json", "internal_error")]
+    [InlineData("502-html", "network_error")]
+    public async Task Fallback_over_real_sockets_with_the_default_http_client(string kind, string onlineCode)
+    {
+        using var http = new LocalHttpServer(_ => Unavailable(kind));
+        var store = new MemoryStore();
+        store.SetLeaseToken(Vectors.ProductId, Vectors.ValidLeaseToken);
+        using var client = new VelsigilClient(http.BaseUrl, Vectors.ProductId, Vectors.PublicKey,
+            new VelsigilClientOptions { Store = store, HardwareId = Vectors.TestHwid, Clock = new FakeClock(Payloads.ServerTime + 60).GetNow });
+
+        var online = await client.ValidateAsync(Key);
+        var result = await client.ValidateWithOfflineFallbackAsync(Key);
+
+        Assert.Equal(onlineCode, online.Code);
+        Assert.Null(online.RetryAfter); // Retry-After is surfaced for rate_limited only
+        Assert.True(result.Ok);
+        Assert.True(result.Offline);
+        Assert.Equal(2, http.Requests.Count);
     }
 
     [Fact]
