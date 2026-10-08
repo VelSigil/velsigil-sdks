@@ -87,6 +87,8 @@ jobs:
         working-directory: node
         run: |
           set -euo pipefail
+          # npm pack does not create its destination: without this the step fails with ENOENT (first release run).
+          mkdir -p "$RUNNER_TEMP/dist"
           npm ci --ignore-scripts
           npm test
           npm run build
