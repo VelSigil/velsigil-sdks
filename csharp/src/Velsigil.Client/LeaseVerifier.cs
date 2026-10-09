@@ -42,56 +42,34 @@ public sealed class LeaseVerification
     /// <summary>True only for <see cref="LeaseStatus.Valid"/>.</summary>
     public bool IsValid => Status == LeaseStatus.Valid;
 
-    /// <summary>
-    /// The authenticated claims when the signature was valid and the payload well-formed (also for
-    /// <see cref="LeaseStatus.Expired"/> and the mismatch outcomes, for diagnostics); otherwise null.
-    /// Only rely on them when <see cref="IsValid"/> is true.
-    /// </summary>
+    /// <summary>Authenticated claims (also for expired or mismatched leases); rely on them only when <see cref="IsValid"/>.</summary>
     public LeaseClaims? Claims { get; }
 }
 
-/// <summary>
-/// Verifies offline lease tokens (SPEC 10.4): <c>base64url(JSON) "." base64url(Ed25519 signature over
-/// the ASCII bytes of the first part)</c>. Acceptance requires a valid signature, <c>typ = "lease"</c>,
-/// matching product id and hardware-id hash, and <c>now &lt; exp</c>.
-/// </summary>
-/// <remarks>
-/// Offline validation trusts the local clock (plus any offset learned from the server during this
-/// process). Winding the clock back can extend a lease until its <c>exp</c>; this is a documented
-/// limitation of offline licensing, which is why leases are short-lived.
-/// </remarks>
+/// <summary>Verifies offline lease tokens: signature, <c>typ</c>, product, device and expiry.</summary>
+/// <remarks>Offline checks trust the local clock, which is why leases are short-lived.</remarks>
 public static class LeaseVerifier
 {
     private const int MaxTokenLength = 16 * 1024;
 
-    /// <summary>
-    /// Verifies <paramref name="token"/> against <paramref name="publicKeyBase64"/>.
-    /// </summary>
+    /// <summary>Verifies <paramref name="token"/> against <paramref name="publicKeyBase64"/>.</summary>
     /// <param name="token">The lease token.</param>
     /// <param name="publicKeyBase64">The product's Ed25519 public key (standard base64).</param>
     /// <param name="productId">The product id the lease must belong to.</param>
     /// <param name="hwid">The raw hardware id of this machine (the SDK hashes it).</param>
     /// <param name="now">The current time.</param>
-    /// <exception cref="ArgumentException">
-    /// The public key is invalid, or it is one of the public keys of the SDK test vectors. Their private keys are
-    /// published, so anyone could sign a lease for them; this helper has no server URL, so (unlike the
-    /// <see cref="VelsigilClient"/> constructor) it refuses them for every caller.
-    /// </exception>
+    /// <exception cref="ArgumentException">The public key is invalid or is a published test-vector key.</exception>
     public static LeaseVerification Verify(string? token, string publicKeyBase64, string productId, string hwid, DateTimeOffset now)
     {
         var key = Ed25519Verifier.FromBase64(publicKeyBase64);
         if (key.IsPublishedTestKey)
         {
-            // The exception type and parameter of an invalid key, with the client constructor's refusal message.
             throw new ArgumentException(PublishedTestKeys.RefusalMessage, nameof(publicKeyBase64));
         }
         return Verify(token, key, productId, hwid, now);
     }
 
-    /// <summary>
-    /// Not part of the public API: verifies with an already decoded key and does not refuse the published test keys.
-    /// Used by the SDK's own vector tests; <see cref="VelsigilClient"/> checks its key in its constructor (loopback rule).
-    /// </summary>
+    /// <summary>Verifies with a decoded key and accepts the published test keys (SDK tests only).</summary>
     internal static LeaseVerification Verify(string? token, Ed25519Verifier key, string? productId, string? hwid, DateTimeOffset now) =>
         Verify(token, key, productId ?? string.Empty, hwid ?? string.Empty, now.ToUnixTimeSeconds());
 
@@ -142,7 +120,7 @@ public static class LeaseVerifier
                 || !JsonRead.TryGetOptionalUnixTime(root, "licenseExpiresAt", out licenseExpiresAt)
                 || !JsonRead.TryGetUnixTime(root, "iat", out issuedAt)
                 || !JsonRead.TryGetUnixTime(root, "exp", out expiresAt)
-                // Optional free-trial flag (SPEC 9.7): absent/null = not a trial; a non-boolean is malformed.
+                // Optional trial flag; a non-boolean is malformed.
                 || !JsonRead.TryGetOptionalBoolean(root, "trial", out trial))
             {
                 return Fail(LeaseStatus.Malformed);
@@ -155,7 +133,7 @@ public static class LeaseVerifier
         else if (nowUnix >= expiresAt) status = LeaseStatus.Expired;
         else status = LeaseStatus.Valid;
 
-        // Claims of an expired or mismatched lease are diagnostics only: their HasFeature is false (MONEY-V1).
+        // Claims of an expired or mismatched lease are diagnostics only: HasFeature is false.
         var claims = new LeaseClaims(leaseProductId, licenseId, activationId, hwidHash, plan, features, licenseExpiresAt, issuedAt, expiresAt, valid: status == LeaseStatus.Valid, isTrial: trial);
         return new LeaseVerification(status, claims);
     }

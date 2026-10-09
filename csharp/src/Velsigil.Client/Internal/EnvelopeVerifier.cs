@@ -25,36 +25,16 @@ internal enum EnvelopeStatus
     /// <summary>The payload answers a different kind of request.</summary>
     TypeMismatch,
 
-    /// <summary>
-    /// The signed lease or <c>activation.hwidHash</c> belongs to another device than the one the
-    /// (device-bound) request was sent for.
-    /// </summary>
+    /// <summary>The lease or activation belongs to another device than the request.</summary>
     HwidMismatch,
 }
 
-/// <summary>
-/// Verifies <c>{ data, sig, kid }</c> envelopes (SPEC 10.1). The Ed25519 signature is checked over the
-/// exact ASCII bytes of the <c>data</c> string <b>before</b> anything is decoded or parsed. Only the
-/// constructor-supplied public key is trusted; <c>kid</c> is ignored for key selection.
-/// </summary>
+/// <summary>Verifies <c>{ data, sig, kid }</c> envelopes over the exact <c>data</c> bytes; <c>kid</c> is ignored.</summary>
 internal static class EnvelopeVerifier
 {
     private static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     /// <summary>Parses the raw HTTP body as an envelope and verifies it.</summary>
-    /// <param name="key">The pinned product key.</param>
-    /// <param name="body">The raw HTTP response body.</param>
-    /// <param name="expectedNonce">The nonce sent with the request.</param>
-    /// <param name="expectedProductId">The configured product id.</param>
-    /// <param name="expectedType">
-    /// The request type the payload must answer (always checked: the server also signs <c>ok</c> answers
-    /// to <c>update_check</c>, which needs no license).
-    /// </param>
-    /// <param name="expectedHwid">
-    /// The hwid sent with a device-bound request (validate, deactivate, download), or null. When set, the
-    /// signed lease and the optional <c>activation.hwidHash</c> must belong to this device.
-    /// </param>
-    /// <param name="payload">The verified payload (only for <see cref="EnvelopeStatus.Valid"/>).</param>
     public static EnvelopeStatus Verify(
         Ed25519Verifier key,
         byte[] body,
@@ -98,19 +78,17 @@ internal static class EnvelopeVerifier
     {
         payload = null;
 
-        // 1. A missing or undecodable signature can never be valid.
         if (string.IsNullOrEmpty(sig) || !Base64Url.TryDecode(sig, out var signature) || signature.Length != Ed25519Verifier.SignatureLength)
         {
             return EnvelopeStatus.InvalidSignature;
         }
 
-        // 2. The signed string must be pure base64url so that "its ASCII bytes" is unambiguous.
+        // The signed string must be pure base64url so its ASCII bytes are unambiguous.
         if (!Base64Url.IsUnpaddedAlphabet(data)) return EnvelopeStatus.Malformed;
 
-        // 3. Verify over the exact bytes received, before decoding or parsing anything.
+        // Verify the exact bytes received before decoding or parsing anything.
         if (!key.Verify(Encoding.ASCII.GetBytes(data), signature)) return EnvelopeStatus.InvalidSignature;
 
-        // 4. Only now decode and parse the (authenticated) payload.
         if (!Base64Url.TryDecode(data, out var json)) return EnvelopeStatus.Malformed;
         try
         {
@@ -129,15 +107,11 @@ internal static class EnvelopeVerifier
         }
         if (parsed is null) return EnvelopeStatus.Malformed;
 
-        // 5. Bind the response to this request and this product.
         if (!string.Equals(parsed.Nonce, expectedNonce, StringComparison.Ordinal)) return EnvelopeStatus.NonceMismatch;
         if (!string.Equals(parsed.ProductId, expectedProductId, StringComparison.OrdinalIgnoreCase)) return EnvelopeStatus.ProductMismatch;
         if (string.IsNullOrEmpty(expectedType) || !string.Equals(parsed.Type, expectedType, StringComparison.Ordinal)) return EnvelopeStatus.TypeMismatch;
 
-        // 6. The signature binds the payload to the request only through nonce, product and type. For a
-        //    device-bound request its lease / activation must also describe the requesting device;
-        //    otherwise the request (hwid, device secret) was rewritten in transit, e.g. by a
-        //    license-sharing proxy, and the answer is about another device.
+        // A device-bound answer must describe the requesting device, or the request was rewritten in transit.
         if (expectedHwid != null)
         {
             var binding = CheckDeviceBinding(key, parsed, expectedProductId, expectedHwid);
@@ -148,10 +122,7 @@ internal static class EnvelopeVerifier
         return EnvelopeStatus.Valid;
     }
 
-    /// <summary>
-    /// Reports device-binding failures only. Other lease defects (expired, ...) are not binding failures;
-    /// such a lease is simply never stored.
-    /// </summary>
+    /// <summary>Reports device-binding failures only; other lease defects just keep the lease from being stored.</summary>
     private static EnvelopeStatus CheckDeviceBinding(Ed25519Verifier key, SignedPayload payload, string productId, string hwid)
     {
         if (payload.ActivationHwidHash != null && !Crypto.HexEquals(payload.ActivationHwidHash, HardwareId.HashHwid(hwid)))

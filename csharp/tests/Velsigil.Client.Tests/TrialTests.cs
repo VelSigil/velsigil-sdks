@@ -8,7 +8,7 @@ using Xunit;
 
 namespace Velsigil.Client.Tests;
 
-/// <summary>In-app free trials: <see cref="VelsigilClient.StartTrialAsync"/> (SPEC 9.7 "In-app trials").</summary>
+/// <summary>In-app free trials: <see cref="VelsigilClient.StartTrialAsync"/>.</summary>
 public class TrialTests
 {
     private const string TrialKey = "DEMO-7K3QM-P9XWD-R4TNB-H2CFY-M8LJV";
@@ -71,7 +71,7 @@ public class TrialTests
     {
         var server = new MockServer();
         server.Respond(r => Responses.Signed(Payloads.Base(r, false, code, "Server text.")));
-        // A trial is only ever sent with nothing stored (a stored secret or lease answers already_licensed locally).
+        // A trial is only sent with nothing stored.
         var store = new MemoryStore();
         using var client = TestClients.Create(server, store);
 
@@ -87,7 +87,6 @@ public class TrialTests
         Assert.Equal("jane@example.com", server.Requests.Single().Field("email"));
     }
 
-    // Review finding 7: a trial answer would overwrite the device secret and lease of the license this device holds.
     private const string PaidSecret = "dsk_P4idL1c3P4idL1c3P4idL1c3P4idL1c3P4idL1c3abc";
 
     [Theory]
@@ -97,7 +96,7 @@ public class TrialTests
     public async Task StartTrial_refuses_locally_when_a_device_secret_or_lease_is_stored(bool secretStored, bool leaseStored)
     {
         var server = new MockServer();
-        // If anything were sent, the server would start a trial whose secret and lease replace the stored ones.
+        // Would replace the stored secret and lease if anything were sent.
         server.Respond(r => Responses.Signed(Started(r)));
         var store = new MemoryStore();
         if (secretStored) store.SetDeviceSecret(Vectors.ProductId, PaidSecret);
@@ -118,7 +117,6 @@ public class TrialTests
         Assert.Equal(leaseStored ? Vectors.ValidLeaseToken : null, store.GetLeaseToken(Vectors.ProductId));
     }
 
-    // Final sweep F-SDK-1: a failed store read is not "nothing stored"; the guard fails closed.
     private sealed class FlakyStore : IVelsigilStore
     {
         private readonly MemoryStore _inner = new MemoryStore();
@@ -176,8 +174,6 @@ public class TrialTests
         Assert.Equal(PaidSecret, store.GetDeviceSecret(Vectors.ProductId));
     }
 
-    // Final sweep F-CLIENT-4: the already_licensed check and the trial request form one step under the device lock, so
-    // a validation in progress cannot store a license between them (the trial answer would then replace it).
     [Fact]
     public async Task StartTrial_waits_for_a_validation_in_progress_and_then_refuses()
     {
@@ -207,8 +203,7 @@ public class TrialTests
         Assert.Equal(Vectors.ValidLeaseToken, store.GetLeaseToken(Vectors.ProductId));
     }
 
-    // Final sweep F-SDK-4: days left are rounded up (CLIENT_PROTOCOL 5.2): N right after an N-day trial starts, 1 on
-    // its last day, 0 once expired.
+    // Days left are rounded up: N right after an N-day trial starts, 1 on its last day, 0 once expired.
     [Theory]
     [InlineData(14 * 86400L, 14)]
     [InlineData(14 * 86400L - 1, 14)]

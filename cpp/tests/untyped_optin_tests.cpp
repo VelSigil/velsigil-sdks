@@ -1,9 +1,4 @@
-// S8 (final review 2026-10-06): the type-less verify_envelope overloads exist only where
-// VELSIGIL_ALLOW_UNTYPED_ENVELOPE is defined (CMakeLists.txt defines it for this target only; real programs
-// define it for every file or not at all). Checks that the opt-in still compiles, links and fails closed
-// on garbage, and that it refuses the published test-vector keys like verify_envelope_typed does. The
-// overloads stay [[deprecated]] and UNSAFE (no `type` check): never use them in new code.
-// Exit code 0 = all checks passed.
+// Checks the opt-in untyped verify_envelope overloads compile, fail closed and refuse the test keys.
 #ifndef VELSIGIL_ALLOW_UNTYPED_ENVELOPE
 #error "untyped_optin_tests.cpp must be compiled with VELSIGIL_ALLOW_UNTYPED_ENVELOPE"
 #endif
@@ -51,9 +46,7 @@ bool refused(const velsigil::EnvelopeVerification& verification) {
   return verification.status == velsigil::EnvelopeStatus::invalid_signature && verification.payload_json.empty();
 }
 
-// The published test-vector keys (keys.publicKey signs validate_ok, keys.wrongPublicKey signs wrong_key): both
-// overloads refuse them like an invalid key. Control: the same envelope and key verify through the internal
-// entry point (src/detail.hpp), so the refusal is the only reason for the failure.
+// Both overloads refuse the published keys; the internal entry point is the control.
 void check_published_key(const std::string& label, const std::string& key, const json& vec) {
   const std::string envelope = vec.at("envelope").dump();
   const std::string nonce = vec.at("requestNonce").get<std::string>();

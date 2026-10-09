@@ -3,11 +3,7 @@ using System.Collections.Generic;
 
 namespace Velsigil.Client.Storage;
 
-/// <summary>
-/// In-memory <see cref="IVelsigilStore"/>. State is lost when the process exits, so a new device secret
-/// is not remembered across restarts (the server then records a device-secret mismatch). Use it for
-/// tests, short-lived tools, or as a building block; prefer <see cref="FileStore"/> for applications.
-/// </summary>
+/// <summary>In-memory store; state is lost on exit, so prefer <see cref="FileStore"/> for applications.</summary>
 public sealed class MemoryStore : IVelsigilStore
 {
     private readonly object _gate = new object();

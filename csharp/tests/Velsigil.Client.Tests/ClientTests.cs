@@ -17,8 +17,6 @@ public class ClientTests
 {
     private const string Key = TestClients.LicenseKey;
 
-    // ---- Happy path -----------------------------------------------------------------------------------
-
     [Fact]
     public async Task Validate_ok_returns_verified_license_and_persists_secret_and_lease()
     {
@@ -125,9 +123,6 @@ public class ClientTests
         Assert.Equal(32, server.Requests.Select(r => r.Nonce).Distinct(StringComparer.Ordinal).Count());
     }
 
-    // Final sweep F-SDK-2: device-bound calls are serialized per client (as in the Node and Python SDKs), so the
-    // second of two concurrent first activations sends the secret the first one stored instead of none (which the
-    // server counts as a secret mismatch, and strict binding answers with device_verification_failed).
     [Fact]
     public async Task Concurrent_first_activations_send_the_secret_the_first_one_stored()
     {
@@ -153,8 +148,6 @@ public class ClientTests
         Assert.Equal(Payloads.DeviceSecret, requests[2].Field("deviceSecret"));
         Assert.Equal(Payloads.DeviceSecret, store.GetDeviceSecret(Vectors.ProductId));
     }
-
-    // ---- Device secret ------------------------------------------------------------------------------
 
     [Fact]
     public async Task Device_secret_is_persisted_and_sent_on_every_request_across_instances()
@@ -208,7 +201,6 @@ public class ClientTests
             new[] { "deviceSecret", "hwid", "licenseKey", "nonce", "productId", "timestamp" },
             requests[3].Json!.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal));
 
-        // Successful deactivation forgets the device secret and the lease.
         var reloaded = new FileStore(directory);
         Assert.Null(reloaded.GetDeviceSecret(Vectors.ProductId));
         Assert.Null(reloaded.GetLeaseToken(Vectors.ProductId));
@@ -229,8 +221,6 @@ public class ClientTests
         Assert.Null(store.GetLeaseToken(Vectors.ProductId));
     }
 
-    // ---- Business failures --------------------------------------------------------------------------
-
     [Theory]
     [InlineData("license_suspended", true)]
     [InlineData("license_revoked", true)]
@@ -241,7 +231,7 @@ public class ClientTests
     [InlineData("device_verification_failed", true)]
     [InlineData("blacklisted", true)]
     [InlineData("product_disabled", true)]
-    [InlineData("device_limit_reached", true)] // SPEC 14 binding lease-clearing set
+    [InlineData("device_limit_reached", true)]
     [InlineData("product_paused", false)]
     [InlineData("outdated_version", false)]
     [InlineData("activation_cooldown", false)]
@@ -273,7 +263,6 @@ public class ClientTests
         Assert.Equal(Payloads.DeviceSecret, store.GetDeviceSecret(Vectors.ProductId));
     }
 
-    // SPEC 9.7: the optional signed "trial" field of the license.
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -318,7 +307,6 @@ public class ClientTests
         Assert.False(result.IsTrial);
     }
 
-    // SPEC 9.7: the trial conversion reference is exposed as is; anything but a well-formed string is refused.
     [Theory]
     [InlineData("vtr1_Ab3_-Ab3_-Ab3_-", true)]
     [InlineData("has space", false)]
@@ -354,8 +342,7 @@ public class ClientTests
         }
     }
 
-    // MONEY-V1: a signed denial never unlocks a feature through License.HasFeature either, even when an
-    // (older) server still listed the plan's features on it; License.Features stays informational.
+    // A signed denial never unlocks a feature through License.HasFeature either.
     [Theory]
     [InlineData("license_revoked", "revoked")]
     [InlineData("license_banned", "banned")]
@@ -419,8 +406,6 @@ public class ClientTests
         Assert.True((await client.ValidateAsync(Key)).Ok);
         Assert.Null(store.GetLeaseToken(Vectors.ProductId));
     }
-
-    // ---- Hostile / broken responses -----------------------------------------------------------------
 
     public static IEnumerable<object[]> HostileResponses()
     {
@@ -492,7 +477,7 @@ public class ClientTests
             response.Headers.Location = new Uri("https://evil.example/collect");
             return response;
         });
-        yield return Case("unknown error code", _ => Responses.Error(418, "totally_ok")); // 400 maps to validation_error (SPEC 14)
+        yield return Case("unknown error code", _ => Responses.Error(418, "totally_ok"));
 
         static object[] Case(string name, Func<MockRequest, HttpResponseMessage> responder) => new object[] { name, new Responder(responder) };
     }
@@ -527,8 +512,6 @@ public class ClientTests
         Assert.Null(store.GetLeaseToken(Vectors.ProductId));
         Assert.Single(server.Requests);
     }
-
-    // ---- Clock skew ---------------------------------------------------------------------------------
 
     [Fact]
     public async Task Clock_skew_learns_offset_and_retries_once_with_a_fresh_nonce()
@@ -590,8 +573,6 @@ public class ClientTests
         Assert.Single(server.Requests);
     }
 
-    // ---- Unsigned HTTP errors -----------------------------------------------------------------------
-
     [Theory]
     [InlineData(400, "validation_error", "validation_error")]
     [InlineData(403, "ip_blocked", "ip_blocked")]
@@ -615,7 +596,7 @@ public class ClientTests
         Assert.Equal(status, result.HttpStatus);
         Assert.Equal("11111111-2222-4333-8444-555555555555", result.RequestId);
         Assert.DoesNotContain("Server says", result.Message, StringComparison.Ordinal);
-        // Retry-After is read from every 429 and 503, whatever code it maps to (1.0.4).
+        // Retry-After is read from every 429 and 503.
         Assert.Equal(status == 429 || status == 503 ? TimeSpan.FromSeconds(30) : (TimeSpan?)null, result.RetryAfter);
     }
 
@@ -659,12 +640,7 @@ public class ClientTests
         Assert.Equal(expected, result.Code);
     }
 
-    // ---- Retry-After of 429 and 503 answers (1.0.4, identical in every Velsigil SDK) ---------------------------
-
-    /// <summary>
-    /// An answer with <c>Retry-After</c>: no body, a Velsigil error body with <paramref name="body"/> as its code, an HTML
-    /// page, or a body over the 64 KB error-body cap ("oversized").
-    /// </summary>
+    /// <summary>An answer with Retry-After and an empty, Velsigil-error, HTML or oversized body.</summary>
     private static HttpResponseMessage WithRetryAfter(int status, string body, string retryAfter)
     {
         if (body.Length == 0) return Responses.Empty(status, ("Retry-After", retryAfter));
@@ -678,7 +654,7 @@ public class ClientTests
     }
 
     [Theory]
-    [InlineData(503, "", "network_error", 30)]               // the empty 503 of a database outage (CLIENT_PROTOCOL 5.3)
+    [InlineData(503, "", "network_error", 30)]               // the empty 503 of a database outage
     [InlineData(503, "service_busy", "internal_error", 30)]  // a Velsigil error body
     [InlineData(503, "html", "network_error", 30)]           // a gateway's page
     [InlineData(503, "oversized", "network_error", 30)]      // a body over the error-body cap
@@ -740,8 +716,6 @@ public class ClientTests
         Assert.Equal(ResultCodes.NetworkError, unparseable.Code);
         Assert.Null(unparseable.RetryAfter);
     }
-
-    // ---- Transport failures -------------------------------------------------------------------------
 
     [Fact]
     public async Task Timeout_is_a_network_error()
@@ -805,8 +779,6 @@ public class ClientTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.ValidateAsync(Key, cancellationToken: cts.Token));
     }
 
-    // ---- Real sockets ---------------------------------------------------------------------------------
-
     [Fact]
     public async Task Works_against_a_local_http_server_with_the_default_http_client()
     {
@@ -836,9 +808,7 @@ public class ClientTests
     [InlineData(308)]
     public async Task Redirect_followed_by_an_injected_http_client_is_an_invalid_response(int redirectStatus)
     {
-        // SDK-2: an injected HttpClient keeps .NET's default AllowAutoRedirect = true, and a 307/308
-        // re-sends the POST to the Location host. Its signed answer must still be rejected: the protocol
-        // never follows redirects.
+        // An injected HttpClient follows 307/308 by default; the signed answer must still be rejected.
         using var target = new LocalHttpServer(r => Responses.Signed(Payloads.ValidateOk(r)));
         using var origin = new LocalHttpServer(r =>
         {
@@ -871,8 +841,6 @@ public class ClientTests
         Assert.Null(store.GetDeviceSecret(Vectors.ProductId));
         Assert.Null(store.GetLeaseToken(Vectors.ProductId));
     }
-
-    // ---- Local validation & configuration ----------------------------------------------------------
 
     [Theory]
     [InlineData("")]
@@ -916,7 +884,7 @@ public class ClientTests
     [InlineData("")]
     public void Insecure_or_invalid_api_urls_are_rejected(string url)
     {
-        // A freshly generated key: the published test-vector keys are refused for non-loopback hosts anyway.
+        // A fresh key, since the test-vector keys are refused for non-loopback hosts anyway.
         Assert.Throws<ArgumentException>(() => new VelsigilClient(url, Vectors.ProductId, TestSigner.Random().PublicKeyBase64,
             new VelsigilClientOptions { Store = new MemoryStore(), HardwareId = Vectors.TestHwid }));
     }
@@ -988,8 +956,6 @@ public class ClientTests
         Assert.All(errors, e => Assert.IsType<InvalidOperationException>(e));
     }
 
-    // ---- Update check -------------------------------------------------------------------------------
-
     [Fact]
     public async Task Check_update_sends_no_license_data_and_returns_update_info()
     {
@@ -1019,7 +985,7 @@ public class ClientTests
     public async Task Check_update_with_no_release()
     {
         var server = new MockServer();
-        // Exactly what the server sends (SPEC 10.2): ok = true, code no_release, update = null.
+        // What the server sends when nothing is published.
         server.Respond(r => Responses.Signed(Payloads.Base(r, true, "no_release", "No release has been published yet.")));
         using var client = TestClients.Create(server);
 

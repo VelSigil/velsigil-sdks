@@ -23,22 +23,19 @@ import { SDK_VERSION } from './version.js';
 
 /** Options of {@link VelsigilClient}. */
 export interface VelsigilClientOptions {
-  /** Request timeout in milliseconds, covering connect + response (default 15 000, max 600 000). */
+  /** Request timeout in milliseconds (default 15 000, max 600 000). */
   timeout?: number;
-  /**
-   * Hardware id override (8-256 characters). Defaults to {@link VelsigilClient.getHardwareId}.
-   * Must be stable for the device, otherwise every run counts as a new activation.
-   */
+  /** Hardware id override (8-256 characters); must be stable or every run is a new activation. */
   hwid?: string;
   /** Persistence for the device secret and offline lease (default: in-memory {@link MemoryStore}). */
   store?: VelsigilStore;
   /** Allow plain `http://` to non-loopback hosts. Never enable this in production. */
   allowInsecureHttp?: boolean;
-  /** Custom fetch implementation (e.g. one configured with a proxy). Defaults to the global fetch. */
+  /** Custom fetch implementation, e.g. one with a proxy. */
   fetch?: FetchFunction;
-  /** Clock in milliseconds since the epoch (default `Date.now`). Mainly for tests. */
+  /** Clock in milliseconds since the epoch (default `Date.now`). */
   clock?: () => number;
-  /** Called when the store fails to load or save. The SDK keeps working from memory. */
+  /** Called when the store fails to load or save; the SDK keeps working from memory. */
   onStoreError?: (error: unknown) => void;
   /** Maximum accepted response size in bytes (default 1 MiB). */
   maxResponseBytes?: number;
@@ -48,16 +45,13 @@ export interface VelsigilClientOptions {
 export interface ValidateOptions {
   /** Your application version (max 32 chars); enables `outdated_version` and update info. */
   version?: string;
-  /** Human readable device name shown to the seller/customer (max 255 chars). */
+  /** Device name shown to the seller and customer (max 255 chars). */
   deviceName?: string;
 }
 
 /** Per-call options of {@link VelsigilClient.startTrial}. */
 export interface StartTrialOptions extends ValidateOptions {
-  /**
-   * The customer's e-mail address (max 254 chars). Only read when the seller's trial offer requires an e-mail
-   * confirmation; then the answer is `trial_confirmation_sent` and the key arrives by e-mail. Otherwise ignored.
-   */
+  /** Customer e-mail (max 254 chars), used only when the trial offer requires e-mail confirmation. */
   email?: string;
 }
 
@@ -71,7 +65,7 @@ const MAX_DEVICE_NAME_LENGTH = 255;
 const MAX_EMAIL_LENGTH = 254;
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
-/** Messages for responses that carry no trustworthy (signed) text. */
+/** Unsigned responses carry no trustworthy text, so the SDK supplies its own. */
 const UNSIGNED_MESSAGES: Record<string, string> = {
   validation_error: 'The license server rejected the request as invalid.',
   ip_blocked: 'Requests from this network are blocked by the license server.',
@@ -82,16 +76,13 @@ const UNSIGNED_MESSAGES: Record<string, string> = {
   unsupported_media_type: 'The license server rejected the request format.',
 };
 
-/** `panel_too_old` (SPEC 14): the server predates in-app trials. */
 const PANEL_TOO_OLD_MESSAGE =
   'The license server does not support starting free trials from the app yet. The seller needs to update the Velsigil panel.';
 
-/** `already_licensed` (SPEC 14): `startTrial` on a device that already holds a license (secret or lease) for the product. */
 const ALREADY_LICENSED_MESSAGE =
   'This device already holds a license for this product (a stored device secret or offline lease); a free trial cannot ' +
   'replace it. Validate the saved license key instead, or call deactivate() or clearStoredState() first. No request was sent.';
 
-/** `store_unavailable` (SPEC 14): `startTrial` could not read the store, so it cannot tell whether a license is stored. */
 const STORE_UNAVAILABLE_MESSAGE =
   'The license store could not be read, so it is unknown whether this device already holds a license for this product; ' +
   'a free trial was not started. Try again once the store can be read. No request was sent.';
@@ -99,28 +90,20 @@ const STORE_UNAVAILABLE_MESSAGE =
 interface Exchange {
   result: VelsigilResult;
   payload: ResponsePayload | null;
-  /**
-   * The server could not answer: no HTTP response at all, or an unsigned HTTP 5xx (see {@link isServerErrorStatus}).
-   * Decides the offline fallback of {@link VelsigilClient.validateWithOfflineFallback}; the result's code is unchanged.
-   */
+  /** No HTTP response or an unsigned 5xx; this triggers the offline fallback. */
   unavailable: boolean;
 }
 
-/** {@link VelsigilClient.validate}'s result plus whether the server was unavailable (see {@link Exchange}). */
 interface OnlineValidation {
   result: VelsigilResult;
   unavailable: boolean;
 }
 
-/** A local input error of validate (no request sent): never "server unavailable". */
 function localValidationFailure(message: string): OnlineValidation {
   return { result: localFailure('validation_error', message, 'validate'), unavailable: false };
 }
 
-/**
- * One read of the stored state. `fresh` is false when the store could not be read: `state` is then the last state this
- * client read or wrote (empty before the first one), which must never be taken for "nothing stored".
- */
+/** When `fresh` is false the store could not be read; never treat `state` as "nothing stored". */
 interface LoadedState {
   state: StoredState;
   fresh: boolean;
@@ -128,17 +111,9 @@ interface LoadedState {
 
 type RequestFields = Record<string, string | undefined>;
 
-/**
- * Velsigil license client.
- *
- * Every response is verified against the product's Ed25519 public key (signature over the exact
- * `data` bytes, then nonce + productId + type binding, and for device-bound requests the binding of
- * the signed lease/activation to this hwid) before anything in it is used. Methods never throw
- * for licensing, server or network failures; they resolve to a {@link VelsigilResult} with
- * `ok === false` and a `code`.
- */
+/** Velsigil license client; verifies every response's signature and never throws for licensing failures. */
 export class VelsigilClient {
-  /** The product id (lowercased) this client validates against. */
+  /** The product id (lowercased). */
   readonly productId: string;
   /** The hardware id sent to the server. */
   readonly hardwareId: string;
@@ -155,21 +130,17 @@ export class VelsigilClient {
   readonly #userAgent = `velsigil-client-node/${SDK_VERSION}`;
   readonly #deviceLock = new Mutex();
   #clockOffset = 0;
-  /** Last known state; authoritative while `#unsaved` (a store write failed). */
+  /** Authoritative while `#unsaved` (a store write failed). */
   #memoryState: StoredState = emptyState();
-  /** False until the store was read or written once: until then `#memoryState` is a placeholder, not "nothing stored". */
+  /** Until the store was read or written once, `#memoryState` is only a placeholder. */
   #memoryKnown = false;
   #unsaved = false;
 
   /**
-   * @param apiUrl Your Velsigil server URL, e.g. `https://licenses.example.com` (a URL ending in
-   *   `/api/client/v1` is accepted too). HTTPS is required except for localhost/127.0.0.1/::1.
+   * @param apiUrl Your Velsigil server URL; HTTPS is required except for loopback hosts.
    * @param productId The product UUID from the Velsigil panel.
-   * @param publicKeyBase64 The product's Ed25519 public key (base64) from the panel. Ship it inside
-   *   your application; it is the only key the client trusts. The public test keys of the SDK test
-   *   vectors (whose private keys are published) are refused unless `apiUrl` is a loopback host.
-   * @throws {VelsigilError} for invalid configuration (`invalid_public_key` for a malformed key or a
-   *   published test key outside loopback) or when no hardware id can be determined.
+   * @param publicKeyBase64 The product's public key; ship it inside your app, never load it from config.
+   * @throws {VelsigilError} for invalid configuration or when no hardware id can be determined.
    */
   constructor(apiUrl: string, productId: string, publicKeyBase64: string, options: VelsigilClientOptions = {}) {
     if (options === null || typeof options !== 'object') {
@@ -182,9 +153,7 @@ export class VelsigilClient {
       throw new VelsigilError('invalid_configuration', 'productId must be the product UUID from the Velsigil panel');
     }
     this.productId = productId.trim().toLowerCase();
-    // The published test keys of the SDK test vectors are accepted only for a loopback API URL (the public
-    // low-level helpers, which have no URL, refuse them always). Every verification below uses this key through
-    // the internal `...AllowingTestKeys` paths, so the loopback decision made here is the only one.
+    // The only test-key check: later verifications use the `...AllowingTestKeys` paths.
     this.#publicKey = parsePublicKeyAllowingTestKeys(publicKeyBase64);
     if (isPublishedTestKey(this.#publicKey) && !isLoopbackHost(this.#base.hostname)) {
       throw new VelsigilError('invalid_public_key', PUBLISHED_TEST_KEY_MESSAGE);
@@ -236,37 +205,22 @@ export class VelsigilClient {
     }
   }
 
-  /** This machine's Velsigil hardware id (see SPEC 10.6). Cached per process. */
+  /** This machine's hardware id, cached per process. */
   static getHardwareId(): string {
     return getHardwareId();
   }
 
-  /** Learned difference `serverTime - localTime` in seconds (0 until a clock_skew response). */
+  /** Learned `serverTime - localTime` in seconds (0 until a clock_skew response). */
   get clockOffset(): number {
     return this.#clockOffset;
   }
 
-  /**
-   * Validates (and on first use activates) the license on this device. Persists a newly issued
-   * device secret and the offline lease. Never throws.
-   */
+  /** Validates (and on first use activates) the license on this device. Never throws. */
   async validate(licenseKey: string, options: ValidateOptions = {}): Promise<VelsigilResult> {
     return (await this.#validateOnline(licenseKey, options)).result;
   }
 
-  /**
-   * Starts a free trial of the product on this device, without a license key (SPEC 9.7 "In-app trials"). The seller
-   * must turn on the in-app channel of the product's trial offer. On success (`ok`) `result.trialKey` holds the new
-   * license key: store it right away (the server can never send it again) and use it with {@link validate} from then
-   * on; the device secret and the offline lease are persisted like after a validation. Call it only when the app has
-   * no key yet: when a device secret or an offline lease is already stored for the product, it refuses locally with
-   * `already_licensed` (no request, the stored state is untouched), so a trial never replaces this device's license.
-   * When the store cannot be read it refuses with `store_unavailable` (no request): it cannot tell whether a license
-   * is stored. Signed failures: `trial_already_used` (this device had its trial of this product),
-   * `trial_unavailable`, `trial_email_required` / `trial_email_invalid` / `trial_email_not_accepted` (offers that
-   * confirm an e-mail address), `trial_confirmation_sent` (not a failure of the user: the key arrives by e-mail);
-   * `panel_too_old` when the Velsigil server predates in-app trials. Never throws.
-   */
+  /** Starts a free trial without a key. The server sends `result.trialKey` only once; store it. Never throws. */
   startTrial(options: StartTrialOptions = {}): Promise<VelsigilResult> {
     return this.#deviceLock.run(async () => {
       const version = optionalText(options?.version, MAX_VERSION_LENGTH);
@@ -277,10 +231,9 @@ export class VelsigilClient {
       if (email === null) return localFailure('validation_error', 'email is too long.', 'trial');
 
       const loaded = await this.#loadState();
-      // A failed read is not "nothing stored": the store may hold this device's (paid) license. Fail closed.
+      // Fail closed: an unreadable store may hold a paid license.
       if (!loaded.fresh) return localFailure('store_unavailable', STORE_UNAVAILABLE_MESSAGE, 'trial');
-      // The trial answer would overwrite the stored device secret and lease of this device's license (a paid one
-      // included). Checked under the device lock, so no concurrent validate can slip in between.
+      // A trial must not overwrite this device's license; the device lock keeps validate out meanwhile.
       if (loaded.state.deviceSecret !== null || loaded.state.lease !== null) {
         return localFailure('already_licensed', ALREADY_LICENSED_MESSAGE, 'trial');
       }
@@ -307,7 +260,6 @@ export class VelsigilClient {
         deviceSecret: loaded.state.deviceSecret ?? undefined,
       });
       if (payload !== null && (payload.code === 'ok' || payload.code === 'device_not_found')) {
-        // The activation no longer exists server-side: its secret and lease are useless now.
         await this.#saveState(emptyState());
       } else if (payload !== null) {
         await this.#applyPayload(loaded, payload);
@@ -316,7 +268,7 @@ export class VelsigilClient {
     });
   }
 
-  /** Asks the server for the latest published release. `result.update` carries the details. */
+  /** Asks for the latest published release; details are in `result.update`. */
   async checkUpdate(currentVersion?: string): Promise<VelsigilResult> {
     const version = optionalText(currentVersion, MAX_VERSION_LENGTH);
     if (version === null) return localFailure('validation_error', 'version is too long.', 'update_check');
@@ -324,10 +276,7 @@ export class VelsigilClient {
     return result;
   }
 
-  /**
-   * Requests a short-lived download link for the latest (or the given) release. Requires an
-   * activated device. Use {@link downloadRelease} to fetch and verify the file.
-   */
+  /** Requests a short-lived download link for the latest or given release; needs an activated device. */
   getDownload(licenseKey: string, version?: string): Promise<VelsigilResult> {
     return this.#deviceLock.run(async () => {
       const key = normalizeKey(licenseKey);
@@ -346,10 +295,7 @@ export class VelsigilClient {
     });
   }
 
-  /**
-   * Downloads the file described by `download` (from {@link getDownload}) to `destination`,
-   * verifying the signed size and SHA-256. The file only appears at `destination` when verified.
-   */
+  /** Downloads a release and verifies its signed size and SHA-256 before it appears at `destination`. */
   async downloadRelease(
     download: DownloadInfo,
     destination: string,
@@ -386,37 +332,16 @@ export class VelsigilClient {
     return downloadToFile({ ...download, url }, destination, { fetch: this.#fetch, userAgent: this.#userAgent }, options);
   }
 
-  /**
-   * Validates the stored offline lease without contacting the server: signature, product, this
-   * device's hwid and expiry (local clock + learned server offset). Never throws.
-   */
+  /** Validates the stored offline lease without contacting the server. Never throws. */
   validateOffline(): Promise<VelsigilResult> {
     return this.#deviceLock.run(() => this.#validateOfflineUnlocked());
   }
 
-  /**
-   * Online validation first; when the server is unavailable, the stored offline lease is used instead
-   * ({@link validateOffline}). "Unavailable" means:
-   * - no HTTP response at all (`network_error`: DNS, connect, TLS, timeout, connection reset), or
-   * - an unsigned HTTP 5xx answer (500-599), whatever its body: a Velsigil error body (`internal_error`, e.g. while the
-   *   panel is up but its database is down), a gateway's HTML page (502/503/504 from IIS ARR, Caddy, nginx, ...), an
-   *   empty, non-JSON or oversized body. {@link validate} reports these as `internal_error` or `network_error`.
-   *
-   * Every other answer is final and returned as is: all signed answers (`license_revoked`, `license_expired`, device
-   * denials, ...), 4xx errors (`rate_limited`, `validation_error`, `ip_blocked`, `unknown_product`, ...), redirects and
-   * `invalid_response` (for example a bad signature). When the fallback finds no usable lease, the result is
-   * `lease_expired` or `lease_invalid` for an unusable stored lease, and the original online result (`network_error`,
-   * `internal_error`, ...) when none is stored.
-   *
-   * A result of the fallback (offline `ok`, `lease_expired`, `lease_invalid`) carries the `retryAfter` of the failed
-   * online attempt (the `Retry-After` of a 503, e.g. 30 s while the server's database is unreachable), so the app knows
-   * when to try online again; null when that answer had none.
-   */
+  /** Validates online; uses the offline lease only if there is no response or an unsigned 5xx. */
   async validateWithOfflineFallback(licenseKey: string, options: ValidateOptions = {}): Promise<VelsigilResult> {
     const online = await this.#validateOnline(licenseKey, options);
     if (!online.unavailable) return online.result;
     const offline = await this.#deviceLock.run(() => this.#validateOfflineUnlocked(online.result.retryAfter));
-    // Without any stored lease the original failure (network_error, internal_error, ...) is the more useful answer.
     return offline.code === 'no_lease' ? online.result : offline;
   }
 
@@ -424,9 +349,6 @@ export class VelsigilClient {
   clearStoredState(): Promise<void> {
     return this.#deviceLock.run(() => this.#saveState(emptyState()));
   }
-
-  // ---------------------------------------------------------------------------------------------
-  // Internals
 
   #localNowSeconds(): number {
     return Math.floor(this.#clock() / 1000);
@@ -436,7 +358,6 @@ export class VelsigilClient {
     return this.#localNowSeconds() + this.#clockOffset;
   }
 
-  /** {@link validate}, also telling whether the server was unavailable (the offline fallback rule). */
   #validateOnline(licenseKey: string, options: ValidateOptions): Promise<OnlineValidation> {
     return this.#deviceLock.run(async () => {
       const local = localValidationFailure;
@@ -460,10 +381,7 @@ export class VelsigilClient {
     });
   }
 
-  /**
-   * Sends one request (fresh nonce + timestamp) and verifies the answer. A signed `clock_skew`
-   * teaches the client the server offset and the request is retried exactly once.
-   */
+  /** Sends one request; a signed `clock_skew` sets the clock offset and retries once. */
   async #exchange(type: RequestType, endpoint: string, fields: RequestFields): Promise<Exchange> {
     const url = new URL(endpoint, this.#base).toString();
     let exchange: Exchange | null = null;
@@ -490,14 +408,9 @@ export class VelsigilClient {
       }
       return exchange;
     }
-    // Second clock_skew in a row: report it instead of looping.
     return exchange as Exchange;
   }
 
-  /**
-   * `hwid` is the hwid sent with a device-bound request: the signed lease/activation must then belong
-   * to this device, otherwise the whole response is rejected and nothing from it is stored.
-   */
   #interpret(outcome: HttpOutcome, type: RequestType, nonce: string, hwid: string | undefined): Exchange {
     if (outcome.kind === 'network_error') {
       return {
@@ -520,7 +433,6 @@ export class VelsigilClient {
           type,
           retryAfter: this.#retryAfter(outcome.status, outcome.headers),
         }),
-        // An oversized error page on a 5xx is still an unsigned 5xx (the server is unavailable).
         unavailable: isServerErrorStatus(outcome.status),
       };
     }
@@ -565,7 +477,7 @@ export class VelsigilClient {
     };
   }
 
-  /** Maps an unsigned HTTP error to a failure result. It can never produce `ok === true`. */
+  /** Unsigned errors can never produce `ok === true`. */
   #unsignedError(status: number, headers: Headers, body: Uint8Array, type: RequestType): VelsigilResult {
     let code: VelsigilCode | null = null;
     let requestId: string | null = null;
@@ -575,7 +487,7 @@ export class VelsigilClient {
       const error = json.value.error;
       velsigilBody = true;
       if (isOneOf(error.code, UNSIGNED_ERROR_CODES)) code = error.code;
-      // A Velsigil server without the in-app trial endpoint answers its generic 404 (SPEC 14 `panel_too_old`).
+      // Servers without the trial endpoint answer a generic 404.
       else if (type === 'trial' && status === 404 && error.code === 'not_found') code = 'panel_too_old';
       if (typeof error.requestId === 'string' && isSafeRequestId(error.requestId)) requestId = error.requestId;
     }
@@ -602,12 +514,6 @@ export class VelsigilClient {
     });
   }
 
-  /**
-   * The `Retry-After` of an HTTP 429 or 503 answer in seconds, whatever code the answer maps to (`rate_limited`;
-   * `network_error` for the empty 503 of a server whose database is unreachable or a gateway's 503; the code of a
-   * Velsigil error body such as 503 `service_busy`; CLIENT_PROTOCOL 5.3, identical in every Velsigil SDK). Null for
-   * every other status and when the header is absent or unparseable.
-   */
   #retryAfter(status: number, headers: Headers): number | null {
     if (status !== 429 && status !== 503) return null;
     return parseRetryAfter(headers.get('retry-after'), this.#clock());
@@ -634,7 +540,6 @@ export class VelsigilClient {
       lease: payload.lease,
       update: payload.update,
       download: null,
-      // Only an `ok` answer of type `trial` carries one (the parser drops it from every other answer).
       trialKey: payload.trial?.key ?? null,
     };
     if (payload.download !== null) {
@@ -647,34 +552,22 @@ export class VelsigilClient {
     return new VelsigilResult(init);
   }
 
-  /**
-   * Applies a verified payload to the stored state: persists a newly issued device secret, replaces
-   * (or removes) the offline lease after a successful validation, and drops the lease after a
-   * signed definitive denial so it can no longer be used offline.
-   *
-   * The answer is merged into what is really stored: when the read before the request failed, the store is read again,
-   * and while it still cannot be read (and was never read) nothing is written except a newly issued device secret. A
-   * failed read is never taken for "nothing stored", so it can never wipe the stored secret of this device.
-   */
+  /** Merges a verified answer into the stored state; a failed read must never wipe the stored secret. */
   async #applyPayload(loaded: LoadedState, payload: ResponsePayload): Promise<void> {
     const issued = payload.activation?.deviceSecret ?? null;
     let state = loaded.state;
     if (!loaded.fresh) {
       const again = await this.#loadState();
-      // Still unreadable and never read: the stored secret is unknown. A newly issued secret belongs to a new activation
-      // (no stored secret can be the right one for it), so it is still worth keeping; anything else waits.
+      // Store still unknown: only a newly issued secret is safe to write.
       if (!again.fresh && !this.#memoryKnown && issued === null) return;
       state = again.state;
     }
     const next: StoredState = { deviceSecret: state.deviceSecret, lease: state.lease };
     if (issued !== null) next.deviceSecret = issued;
 
-    // A started trial is a validation of the new license on this device: same rules for the lease.
     if (payload.ok && (payload.type === 'validate' || payload.type === 'trial')) {
       next.lease = null;
       if (payload.lease !== null) {
-        // The envelope check already rejected a lease bound to another device or product; this
-        // re-check only decides whether the lease is usable (signature, expiry) and gets its exp.
         const check = verifyLeaseAllowingTestKeys(this.#publicKey, payload.lease.token, {
           productId: this.productId,
           hwid: this.hardwareId,
@@ -695,14 +588,10 @@ export class VelsigilClient {
     if (changed) await this.#saveState(next);
   }
 
-  /**
-   * `retryAfter`: the `Retry-After` of the failed online attempt when {@link validateWithOfflineFallback} falls back,
-   * copied onto the offline result; null for a direct {@link validateOffline}.
-   */
+  /** `retryAfter` comes from the failed online attempt when this is the fallback. */
   async #validateOfflineUnlocked(retryAfter: number | null = null): Promise<VelsigilResult> {
     const { state } = await this.#loadState();
     if (state.lease === null) {
-      // Never returned by the fallback (it then reports the online result), so it carries no retryAfter.
       return new VelsigilResult({ ok: false, code: 'no_lease', message: 'No offline lease is stored.', offline: true });
     }
     const now = this.#serverNowSeconds();
@@ -724,7 +613,7 @@ export class VelsigilClient {
         retryAfter,
       });
     }
-    // Tampered, foreign or corrupt lease: drop it so it is never considered again.
+    // Tampered, foreign or corrupt: drop it.
     await this.#saveState({ deviceSecret: state.deviceSecret, lease: null });
     return new VelsigilResult({
       ok: false,
@@ -738,8 +627,7 @@ export class VelsigilClient {
   async #loadState(): Promise<LoadedState> {
     let fresh = true;
     if (this.#unsaved) {
-      // The last save failed: memory holds newer state than the store (e.g. a just-issued secret). It is always a state
-      // built on a successful read or on the answer alone (#applyPayload), never on a failed read.
+      // The last save failed, so memory is newer than the store.
       await this.#saveState(this.#memoryState);
     } else {
       try {
@@ -747,7 +635,6 @@ export class VelsigilClient {
         this.#memoryState = loaded === null || loaded === undefined ? emptyState() : sanitizeState(loaded);
         this.#memoryKnown = true;
       } catch (error) {
-        // Keep working with the last known state rather than failing the license check, but say that this read failed.
         this.#reportStoreError(error);
         fresh = false;
       }
@@ -780,7 +667,6 @@ export class VelsigilClient {
     }
   }
 
-  /** Resolves a (possibly relative) download URL against the API origin and enforces HTTPS. */
   #resolveDownloadUrl(raw: string): string | null {
     let url: URL;
     try {
@@ -797,14 +683,7 @@ export class VelsigilClient {
   }
 }
 
-// -----------------------------------------------------------------------------------------------
-// Helpers
-
-/**
- * Loopback hosts (a parsed URL's `hostname`): the only hosts for which plain `http://` is allowed without
- * `allowInsecureHttp`, and the only ones for which the constructor accepts a published test key. One helper
- * for both rules, so they cannot drift apart.
- */
+/** Shared by the plain-http rule and the test-key rule so they cannot drift apart. */
 function isLoopbackHost(hostname: string): boolean {
   return LOOPBACK_HOSTS.has(hostname);
 }
@@ -844,7 +723,7 @@ function normalizeKey(licenseKey: unknown): string | null {
   return key.length === 0 || key.length > MAX_LICENSE_KEY_LENGTH ? null : key;
 }
 
-/** undefined/empty -> undefined (omitted), too long or not a string -> null (invalid). */
+/** Empty gives undefined (omitted); too long or not a string gives null (invalid). */
 function optionalText(value: unknown, maxLength: number): string | undefined | null {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string') return null;
@@ -857,11 +736,7 @@ function isSafeRequestId(value: string): boolean {
   return /^[A-Za-z0-9._:-]{1,128}$/.test(value);
 }
 
-/**
- * Fallback mapping when an unsigned error body does not carry a known code (SPEC section 14,
- * identical in every Velsigil SDK). `velsigilBody` = the body is a Velsigil error object
- * (`{ "error": { "code": "..." } }`).
- */
+/** Used when an unsigned error body has no known code; the same mapping in every Velsigil SDK. */
 function codeForStatus(status: number, velsigilBody: boolean): VelsigilCode {
   switch (status) {
     case 400:
@@ -875,22 +750,14 @@ function codeForStatus(status: number, velsigilBody: boolean): VelsigilCode {
     case 502:
     case 503:
     case 504:
-      // Gateway/proxy failures without a Velsigil error body mean the server is unreachable (also for a proxy's own
-      // JSON or HTML error page). The code only names the failure: the offline fallback applies to every unsigned 5xx
-      // (isServerErrorStatus), whatever code it maps to.
+      // Without a Velsigil error body this is a gateway that cannot reach the server.
       return velsigilBody ? 'internal_error' : 'network_error';
     default:
       return status >= 500 ? 'internal_error' : 'invalid_response';
   }
 }
 
-/**
- * An HTTP 5xx (500-599). Unsigned (the SDK verifies a signature only on 200), it means the server is unavailable: the
- * Velsigil app is up but cannot answer (its database is down: 500 `internal_error`, 503 `service_busy` or an empty
- * 503), or the gateway in front of it cannot reach it (502/503/504, often with an HTML page). Such an answer triggers
- * the offline fallback like a failed connection. That grants an attacker nothing: whoever can inject an unsigned 5xx
- * can just as well drop the connection, and the fallback only honours the signed, time-limited, device-bound lease.
- */
+/** Unsigned 5xx triggers the offline fallback; safe, as an attacker could just drop the connection. */
 function isServerErrorStatus(status: number): boolean {
   return status >= 500 && status <= 599;
 }
@@ -899,7 +766,6 @@ function localFailure(code: VelsigilCode, message: string, type: RequestType | n
   return new VelsigilResult({ ok: false, code, message, type });
 }
 
-/** The signed `license` object as result data (`trial` → `isTrial`, false when absent). */
 function licenseInfo(license: ProtocolLicense): LicenseInfo {
   return {
     id: license.id,
@@ -915,10 +781,6 @@ function licenseInfo(license: ProtocolLicense): LicenseInfo {
   };
 }
 
-/**
- * `now`: the time of the offline check (unix seconds, local clock + learned offset); the result's reference time.
- * `retryAfter`: the failed online attempt's `Retry-After` when the offline fallback produced it (else null).
- */
 function leaseResult(payload: LeasePayload, token: string, now: number, retryAfter: number | null): VelsigilResult {
   const license: LicenseInfo = {
     id: payload.licenseId,
@@ -930,7 +792,6 @@ function leaseResult(payload: LeasePayload, token: string, now: number, retryAft
     devicesUsed: null,
     createdAt: null,
     isTrial: payload.trial === true,
-    // Leases carry no conversion reference (it is minted fresh by the server, online only).
     trialRef: null,
   };
   const activation: ActivationInfo = {

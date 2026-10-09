@@ -1,5 +1,4 @@
-/** Minimal HTTP transport on top of the global `fetch` with a hard timeout and response size cap. */
-
+/** A `fetch`-compatible function. */
 export type FetchFunction = typeof fetch;
 
 export interface HttpResponse {
@@ -12,7 +11,7 @@ export interface HttpResponse {
 export interface HttpTooLarge {
   kind: 'too_large';
   status: number;
-  /** The answer's headers: an oversized 429/503 still carries its `Retry-After`. */
+  /** Kept so an oversized 429/503 still yields its `Retry-After`. */
   headers: Headers;
 }
 
@@ -30,11 +29,7 @@ export interface PostJsonOptions {
   userAgent: string;
 }
 
-/**
- * POSTs `body` as JSON. Redirects are not followed (`redirect: 'manual'`) so a response can never
- * silently come from another origin or be downgraded to plain HTTP. The timeout covers connecting,
- * sending and reading the whole response. Never throws.
- */
+/** POSTs JSON without following redirects, so an answer can't come from another origin. Never throws. */
 export async function postJson(url: string, body: unknown, options: PostJsonOptions): Promise<HttpOutcome> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
@@ -67,7 +62,7 @@ export async function postJson(url: string, body: unknown, options: PostJsonOpti
   }
 }
 
-/** Reads the body up to `maxBytes`; returns null (and cancels the stream) when it is larger. */
+/** Reads the body up to `maxBytes`; null when it is larger. */
 export async function readBody(response: Response, maxBytes: number): Promise<Uint8Array | null> {
   const declared = response.headers.get('content-length');
   if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
@@ -91,10 +86,10 @@ export async function readBody(response: Response, maxBytes: number): Promise<Ui
   return Buffer.concat(chunks, total);
 }
 
-/** Upper bound of a parsed `Retry-After` in seconds: one day, as in every Velsigil SDK (a longer wait reads as one day). */
+/** Same cap in every Velsigil SDK. */
 export const MAX_RETRY_AFTER_SECONDS = 86_400;
 
-/** Parses `Retry-After` (delta-seconds or HTTP date) into whole seconds, clamped to 0..86400 (one day). */
+/** Parses `Retry-After` (seconds or HTTP date) into whole seconds, capped at one day. */
 export function parseRetryAfter(value: string | null, nowMs: number): number | null {
   if (value === null) return null;
   const trimmed = value.trim();

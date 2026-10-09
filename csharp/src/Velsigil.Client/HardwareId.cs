@@ -10,17 +10,8 @@ using System.Runtime.Versioning;
 
 namespace Velsigil.Client;
 
-/// <summary>
-/// Hardware id derivation shared by every Velsigil SDK (SPEC 10.6):
-/// <c>hwid = lowercase hex SHA-256("vx-hwid-v1:" + machineId)</c> where <c>machineId</c> is trimmed and
-/// lowercased. Sources: Windows <c>HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid</c> (64-bit registry
-/// view), Linux <c>/etc/machine-id</c> then <c>/var/lib/dbus/machine-id</c> (an empty file or systemd's placeholder
-/// <c>uninitialized</c> is skipped), macOS <c>IOPlatformUUID</c>.
-/// </summary>
-/// <remarks>
-/// Hardware ids are spoofable and are not a security boundary on their own; the server pairs them with a
-/// per-device secret. The raw machine id never leaves the machine - only its salted hash does.
-/// </remarks>
+/// <summary>Hardware id: lowercase hex SHA-256 of "vx-hwid-v1:" + the normalised machine id.</summary>
+/// <remarks>Spoofable, so not a security boundary; the raw machine id never leaves the machine.</remarks>
 public static class HardwareId
 {
     /// <summary>Domain-separation prefix hashed in front of the machine id.</summary>
@@ -29,13 +20,8 @@ public static class HardwareId
     private static readonly object CacheLock = new object();
     private static string? _cached;
 
-    /// <summary>
-    /// Returns this machine's hardware id (cached after the first successful read).
-    /// </summary>
-    /// <exception cref="PlatformNotSupportedException">
-    /// No machine id is available on this platform (for example a minimal container). Supply
-    /// <see cref="VelsigilClientOptions.HardwareId"/> instead.
-    /// </exception>
+    /// <summary>Returns this machine's hardware id (cached after the first read).</summary>
+    /// <exception cref="PlatformNotSupportedException">No machine id is available; set <see cref="VelsigilClientOptions.HardwareId"/>.</exception>
     public static string Get()
     {
         if (TryGet(out var hwid)) return hwid;
@@ -83,10 +69,7 @@ public static class HardwareId
         return Crypto.Sha256Hex(Prefix + normalized);
     }
 
-    /// <summary>
-    /// The hash the server stores for a hardware id (lowercase hex SHA-256 of the hwid string). Offline
-    /// leases carry this value as <c>hwidHash</c>.
-    /// </summary>
+    /// <summary>The server-side hash of a hardware id, as carried in leases (<c>hwidHash</c>).</summary>
     public static string HashHwid(string hwid)
     {
         if (hwid is null) throw new ArgumentNullException(nameof(hwid));
@@ -114,7 +97,7 @@ public static class HardwareId
 #endif
     private static string? ReadWindowsMachineGuid()
     {
-        // Always the 64-bit view so 32-bit and 64-bit processes agree on the same value.
+        // Always the 64-bit view so 32-bit and 64-bit processes agree.
         using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
         using var key = baseKey.OpenSubKey(@"SOFTWARE\Microsoft\Cryptography", writable: false);
         return NonEmpty(key?.GetValue("MachineGuid") as string);
@@ -124,11 +107,7 @@ public static class HardwareId
 
     private static string? ReadLinuxMachineId() => ReadLinuxMachineId(LinuxMachineIdPaths);
 
-    /// <summary>
-    /// The first usable machine id among <paramref name="paths"/>. A file that is missing, larger than 4 KiB, empty or
-    /// holds systemd's placeholder <c>uninitialized</c> (any case; written before the first boot commits an id, and left
-    /// in images systemd never booted, where every copy would share one hwid) is skipped, as in every Velsigil SDK.
-    /// </summary>
+    /// <summary>First usable machine id; skips missing, oversized, empty and systemd "uninitialized" files.</summary>
     internal static string? ReadLinuxMachineId(string[] paths)
     {
         foreach (var path in paths)
@@ -147,7 +126,7 @@ public static class HardwareId
 #endif
     private static string? ReadMacPlatformUuid()
     {
-        // Absolute path, no shell, constant arguments: nothing user-controlled reaches the process.
+        // Absolute path, no shell, constant arguments.
         const string ioreg = "/usr/sbin/ioreg";
         if (!File.Exists(ioreg)) return null;
 

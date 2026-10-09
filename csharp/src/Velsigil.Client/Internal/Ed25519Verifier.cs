@@ -4,11 +4,7 @@ using Org.BouncyCastle.Crypto.Signers;
 
 namespace Velsigil.Client.Internal;
 
-/// <summary>
-/// Ed25519 signature verification bound to a single, application-supplied public key
-/// (BouncyCastle <see cref="Ed25519Signer"/>; RFC 8032 pure Ed25519). Instances are immutable and
-/// thread-safe: a fresh signer is created for every verification.
-/// </summary>
+/// <summary>Ed25519 verification with one pinned public key; thread-safe (a fresh signer per call).</summary>
 internal sealed class Ed25519Verifier
 {
     public const int PublicKeyLength = 32;
@@ -26,16 +22,10 @@ internal sealed class Ed25519Verifier
     /// <summary>Key id as the server computes it: first 16 hex chars of SHA-256(raw key).</summary>
     public string KeyId { get; }
 
-    /// <summary>
-    /// True when the decoded key bytes are one of the test-vector keys whose private keys are published
-    /// (<see cref="PublishedTestKeys"/>).
-    /// </summary>
+    /// <summary>True for a test-vector key whose private key is published.</summary>
     public bool IsPublishedTestKey { get; }
 
-    /// <summary>
-    /// Parses a raw 32-byte Ed25519 public key given as standard base64 (the format shown in the panel).
-    /// base64url is accepted as well. Throws <see cref="ArgumentException"/> for anything else.
-    /// </summary>
+    /// <summary>Parses a raw 32-byte key in standard base64 (or base64url); throws <see cref="ArgumentException"/> otherwise.</summary>
     public static Ed25519Verifier FromBase64(string publicKeyBase64)
     {
         if (string.IsNullOrWhiteSpace(publicKeyBase64))
@@ -88,7 +78,7 @@ internal sealed class Ed25519Verifier
         }
         catch (Exception)
         {
-            // Any internal failure is treated as an invalid signature (fail closed).
+            // Any failure counts as an invalid signature (fail closed).
             return false;
         }
     }

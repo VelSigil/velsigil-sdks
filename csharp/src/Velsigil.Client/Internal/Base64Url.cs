@@ -3,10 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Velsigil.Client.Internal;
 
-/// <summary>
-/// RFC 4648 section 5 (base64url) helpers. Encoding never emits padding; decoding is strict about the
-/// alphabet but tolerant of missing (or correct) trailing padding.
-/// </summary>
+/// <summary>Base64url helpers: no padding on encode; decode accepts optional, correct padding.</summary>
 internal static class Base64Url
 {
     /// <summary>Encodes <paramref name="data"/> as base64url without padding.</summary>
@@ -20,10 +17,7 @@ internal static class Base64Url
     public static bool IsAlphabetChar(char c) =>
         (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
 
-    /// <summary>
-    /// True when <paramref name="value"/> is a non-empty string made only of base64url alphabet characters
-    /// (no padding, no whitespace). Used to validate signed strings before taking their ASCII bytes.
-    /// </summary>
+    /// <summary>Non-empty and only base64url characters (no padding, no whitespace).</summary>
     public static bool IsUnpaddedAlphabet(string? value)
     {
         if (string.IsNullOrEmpty(value)) return false;
@@ -34,10 +28,7 @@ internal static class Base64Url
         return true;
     }
 
-    /// <summary>
-    /// Decodes base64url. Accepts input with or without trailing '=' padding; rejects any character
-    /// outside the base64url alphabet (including '+', '/', whitespace) and impossible lengths.
-    /// </summary>
+    /// <summary>Strict base64url decode; padding is optional but must be correct.</summary>
     public static bool TryDecode(string? value, [NotNullWhen(true)] out byte[]? bytes)
     {
         bytes = null;

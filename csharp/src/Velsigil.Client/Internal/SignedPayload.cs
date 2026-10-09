@@ -19,29 +19,20 @@ internal sealed class SignedPayload
     /// <summary>The newly issued device secret (only ever stored, never surfaced on results).</summary>
     public string? DeviceSecret { get; private set; }
 
-    /// <summary>
-    /// Optional <c>activation.hwidHash</c> (lowercase hex SHA-256 of the hwid the activation belongs to);
-    /// checked against the requesting device by <see cref="EnvelopeVerifier"/>. Null when not sent.
-    /// </summary>
+    /// <summary>Optional <c>activation.hwidHash</c>, checked against the requesting device.</summary>
     public string? ActivationHwidHash { get; private set; }
 
     public LeaseInfo? Lease { get; private set; }
     public UpdateInfo? Update { get; private set; }
     public DownloadInfo? Download { get; private set; }
 
-    /// <summary>
-    /// The key of a started in-app trial (SPEC 10.1): required on an ok answer of type <c>trial</c>, never read
-    /// from any other answer (there the field is ignored like an unknown one).
-    /// </summary>
+    /// <summary>Key of a started in-app trial; read only from an ok answer of type <c>trial</c>.</summary>
     public string? TrialKey { get; private set; }
 
     private const int MaxDeviceSecretLength = 512;
     private const int MaxTrialKeyLength = 64;
 
-    /// <summary>
-    /// Parses the decoded payload object (SPEC 10.1). Every documented field is type-checked; unknown
-    /// fields are ignored. Returns null when anything is malformed (callers fail closed).
-    /// </summary>
+    /// <summary>Parses and type-checks the decoded payload; null when anything is malformed.</summary>
     public static SignedPayload? Parse(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object) return null;
@@ -77,16 +68,16 @@ internal sealed class SignedPayload
                 || !JsonRead.TryGetInt32(license, "maxDevices", out var maxDevices)
                 || !JsonRead.TryGetInt32(license, "devicesUsed", out var devicesUsed)
                 || !JsonRead.TryGetUnixTime(license, "createdAt", out var createdAt)
-                // Optional free-trial flag (SPEC 9.7): absent/null = not a trial; a non-boolean is malformed.
+                // Optional trial flag; a non-boolean is malformed.
                 || !JsonRead.TryGetOptionalBoolean(license, "trial", out var trial)
-                // Optional trial conversion reference (SPEC 9.7): absent/null = none; anything but a string is malformed.
+                // Optional trialRef; anything but a string is malformed.
                 || !JsonRead.TryGetOptionalString(license, "trialRef", out var trialRef))
             {
                 return null;
             }
-            // ...and a string must be 1-200 characters of [A-Za-z0-9_-].
+            // A trialRef must also be well-formed.
             if (trialRef != null && !TrialReference.IsWellFormed(trialRef)) return null;
-            // Only an ok answer grants features through the license-level helper too (MONEY-V1).
+            // Only an ok answer grants features.
             p.License = new LicenseInfo(id, plan, status, features, expiresAt, maxDevices, devicesUsed, createdAt, granted: ok, isTrial: trial, trialRef: trialRef);
         }
 
@@ -152,7 +143,7 @@ internal sealed class SignedPayload
             p.Download = new DownloadInfo(url, downloadExpiresAt, fileName, size, sha256.ToLowerInvariant(), releaseVersion);
         }
 
-        // A started in-app trial must carry a well-formed key (1-64 printable ASCII characters, like every key).
+        // A started trial must carry a well-formed key.
         if (ok && string.Equals(type, "trial", System.StringComparison.Ordinal))
         {
             if (!JsonRead.TryGetOptionalObject(root, "trial", out var trialObject, out var hasTrial) || !hasTrial) return null;
@@ -170,7 +161,7 @@ internal sealed class SignedPayload
         if (value.Length == 0 || value.Length > maxLength) return false;
         foreach (var c in value)
         {
-            // Printable ASCII only: the value is echoed back in JSON and persisted / shown by the app.
+            // Printable ASCII only: the value is echoed in JSON and persisted.
             if (c < 0x21 || c > 0x7E) return false;
         }
         return true;

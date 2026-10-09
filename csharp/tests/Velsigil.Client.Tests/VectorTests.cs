@@ -24,8 +24,7 @@ public class VectorTests
     [Fact]
     public void Vector_file_contains_every_documented_case()
     {
-        // 17 until 2026-10-06, then 5 appended for in-app trials and 2 for the trial conversion reference (SPEC 9.7);
-        // older vectors keep their positions.
+        // New vectors are appended; older ones keep their positions.
         Assert.Equal(24, Vectors.EnvelopeNames().Count());
         Assert.Contains("type_mismatch", Vectors.EnvelopeNames().Select(n => (string)n[0]));
         foreach (var name in new[]
@@ -103,8 +102,7 @@ public class VectorTests
     [InlineData("validate_activation_other_device", "test-hwid-9999-zzzzzz")]
     public void Device_binding_vectors_are_authentic_and_bound_to_their_own_device(string name, string ownerHwid)
     {
-        // LIC-4: the signature, nonce and product of these envelopes are fine; only the binding of the
-        // signed lease / activation.hwidHash to the requesting hwid rejects them.
+        // Signature, nonce and product are fine; only the device binding rejects these.
         var vector = Vectors.Envelope(name);
         Assert.Equal("hwid_mismatch", vector.GetProperty("expect").GetString());
         var body = Encoding.UTF8.GetBytes(vector.GetProperty("envelope").GetRawText());
@@ -121,8 +119,7 @@ public class VectorTests
     [Fact]
     public void Type_mismatch_vector_is_authentic_and_rejected_only_by_the_type_check()
     {
-        // SDK-1: a signed update-check answer (ok, no license involved) for this request's nonce and
-        // product must not pass as the answer to a device-bound validate request.
+        // A signed update-check answer must not pass as the answer to a validate request.
         var vector = Vectors.Envelope("type_mismatch");
         Assert.Equal("validate", Vectors.RequestType(vector));
         var body = Encoding.UTF8.GetBytes(vector.GetProperty("envelope").GetRawText());
@@ -216,7 +213,7 @@ public class VectorTests
         }
         else
         {
-            // MONEY-V1: claims of an expired or mismatched lease are diagnostics; they unlock nothing.
+            // Claims of an expired or mismatched lease are diagnostics; they unlock nothing.
             Assert.NotNull(result.Claims);
             Assert.Equal(result.IsValid, result.Claims!.HasFeature("pro"));
             Assert.Contains("pro", result.Claims.Features);
@@ -264,7 +261,7 @@ public class VectorTests
     [Fact]
     public void Free_trial_vectors_carry_the_optional_trial_field_and_the_new_code()
     {
-        // SPEC 9.7: "trial" is an optional, last license field; paid licenses leave it out (old vectors unchanged).
+        // "trial" is an optional, last license field; paid licenses leave it out.
         SignedPayload Open(string name)
         {
             var vector = Vectors.Envelope(name);
@@ -286,7 +283,7 @@ public class VectorTests
         Assert.True(unknown.Ok);
         Assert.False(unknown.License!.IsTrial);
 
-        // The trial conversion reference (SPEC 9.7): on convertible trials, also on license_expired.
+        // The trial conversion reference: on convertible trials, also on license_expired.
         foreach (var name in new[] { "validate_ok_trial_ref", "license_expired_trial_ref" })
         {
             var withRef = Open(name);
@@ -320,7 +317,7 @@ public class VectorTests
     [Fact]
     public void In_app_trial_vectors_carry_the_key_only_on_the_started_trial()
     {
-        // SPEC 9.7 "In-app trials": answers of type "trial"; an ok one carries trial.key as its last key.
+        // Answers of type "trial"; an ok one carries trial.key as its last key.
         SignedPayload? Open(string name, string? requestType = null)
         {
             var vector = Vectors.Envelope(name);

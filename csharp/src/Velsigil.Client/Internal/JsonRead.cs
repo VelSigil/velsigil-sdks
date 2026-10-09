@@ -5,11 +5,7 @@ using System.Text.Json;
 
 namespace Velsigil.Client.Internal;
 
-/// <summary>
-/// Strictly-typed accessors over <see cref="JsonElement"/>. All of them return false on a type mismatch
-/// so callers can fail closed. No reflection-based (de)serialisation is used anywhere in the SDK, which
-/// keeps it trimming/AOT/IL2CPP friendly.
-/// </summary>
+/// <summary>Strict typed JSON accessors that return false on a type mismatch (no reflection, AOT friendly).</summary>
 internal static class JsonRead
 {
     /// <summary>Largest unix time (seconds) representable by <see cref="DateTimeOffset"/> (9999-12-31).</summary>

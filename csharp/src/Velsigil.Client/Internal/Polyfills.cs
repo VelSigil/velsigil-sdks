@@ -1,4 +1,4 @@
-// Minimal polyfills so the netstandard2.0 build gets the same nullable flow analysis as net8.0.
+// Nullable-analysis attributes missing from netstandard2.0.
 #if !NET8_0_OR_GREATER
 namespace System.Diagnostics.CodeAnalysis
 {

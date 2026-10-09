@@ -36,7 +36,7 @@ internal static class Vectors
     public static string? RequestHwid(JsonElement envelopeVector) =>
         envelopeVector.TryGetProperty("hwid", out var hwid) ? hwid.GetString() : null;
 
-    /// <summary>The endpoint an envelope vector answers (its "requestType" field): the signed type must match.</summary>
+    /// <summary>The endpoint an envelope vector answers (its "requestType" field).</summary>
     public static string RequestType(JsonElement envelopeVector) => envelopeVector.GetProperty("requestType").GetString()!;
 
     public static JsonElement Lease(string name) =>

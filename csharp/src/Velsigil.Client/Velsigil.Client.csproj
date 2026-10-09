@@ -8,7 +8,6 @@
     <RootNamespace>Velsigil.Client</RootNamespace>
     <AssemblyName>Velsigil.Client</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <!-- Every nullable-reference warning is a build error. -->
     <WarningsAsErrors>$(WarningsAsErrors);nullable</WarningsAsErrors>
     <Deterministic>true</Deterministic>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
@@ -30,22 +29,17 @@
     <PackageReleaseNotes>https://github.com/VelSigil/velsigil-sdks/blob/main/csharp/CHANGELOG.md</PackageReleaseNotes>
     <RepositoryUrl>https://github.com/VelSigil/velsigil-sdks.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <!-- Repository URL + commit in the .nuspec, so the package links back to the exact source it was built from. -->
+    <!-- Links the package to the exact source commit. -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
 
-    <!--
-      Source Link: the .NET 8+ SDK ships Microsoft.SourceLink.GitHub (Sdks/Microsoft.SourceLink.GitHub) and enables it
-      by default, so the PDBs map every source file to its raw.githubusercontent.com URL at the built commit without a
-      package reference. Files generated during the build are embedded in the PDB instead.
-    -->
+    <!-- Source Link is built into the .NET 8+ SDK. -->
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <DebugType>portable</DebugType>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
-  <!-- CI builds (GitHub Actions) normalise source paths in PDBs and embedded data, so the output does not depend
-       on the runner's checkout directory. Local builds keep real paths for debugging. -->
+  <!-- CI builds use normalised paths so the output does not depend on the checkout folder. -->
   <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
   </PropertyGroup>
@@ -70,7 +64,6 @@
 
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
-    <!-- The license is declared by PackageLicenseExpression; the text ships alongside for offline review. -->
     <None Include="..\..\LICENSE" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 

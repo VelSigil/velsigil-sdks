@@ -9,31 +9,12 @@ using Velsigil.Client.Storage;
 
 namespace ConsoleExample;
 
-/// <summary>
-/// Velsigil .NET SDK walkthrough.
-///
-///   dotnet run --project examples/ConsoleExample -- [validate|offline|update|download &lt;file&gt;|deactivate]
-///
-/// Set <see cref="ApiUrl"/>, <see cref="ProductId"/> and <see cref="PublicKey"/> below to your product's values and
-/// rebuild. While a placeholder (a value in angle brackets) is still in place, the example prints a usage message and
-/// exits with code 2.
-///
-/// Optional environment variables (neither one is a trust anchor):
-///   VELSIGIL_LICENSE_KEY   the license key; prompted when missing, never printed
-///   VELSIGIL_APP_VERSION   defaults to 1.0.0
-///
-/// Local testing only: VELSIGIL_URL, VELSIGIL_PRODUCT_ID and VELSIGIL_PUBLIC_KEY override the three constants, and
-/// only when the API URL (VELSIGIL_URL, or ApiUrl when VELSIGIL_URL is not set) is loopback: host localhost,
-/// 127.0.0.1 or [::1], e.g. a development server on this machine. For any other URL the example refuses to start
-/// (exit code 2) instead of trusting a server or public key taken from the environment.
-///
-/// In a real application the API URL, product id and public key are compiled-in constants: never load the public
-/// key from a file, the registry, an environment variable or the network, or an attacker can swap it for their own.
-/// </summary>
+/// <summary>Velsigil .NET SDK example; set ApiUrl, ProductId and PublicKey below (see Usage).</summary>
+/// <remarks>VELSIGIL_LICENSE_KEY and VELSIGIL_APP_VERSION are read from the environment when set.</remarks>
 internal static class Program
 {
-    // Replace these with the values from the Velsigil panel (Products > your product > Integration). Keep them
-    // compiled in: the public key is the trust anchor that makes forged server responses detectable.
+    // Your product's values from the panel (Products > your product > Integration).
+    // Keep them compiled in: never load the public key from a file, env var or the network.
     private const string ApiUrl = "<your Velsigil server URL, e.g. https://licenses.example.com>";
     private const string ProductId = "<your product id>";
     private const string PublicKey = "<your product's public key>";
@@ -102,9 +83,7 @@ internal static class Program
         }
     }
 
-    // The compiled-in constants, or (local testing only) the environment override, which is honoured only when the
-    // API URL is loopback. False when the example cannot run: a placeholder is still in place, or an override was
-    // given for a non-loopback URL (reported here; the caller prints the usage message).
+    // Environment overrides are honoured only for a loopback API URL (local testing).
     private static bool TryResolveConfiguration(out string apiUrl, out string productId, out string publicKey)
     {
         var urlOverride = EnvironmentOverride("VELSIGIL_URL");
@@ -131,10 +110,10 @@ internal static class Program
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
-    // The placeholders above are in angle brackets; no real URL, product id or base64 key contains '<'.
+    // Placeholders are in angle brackets; no real value contains '<'.
     private static bool IsPlaceholder(string value) => string.IsNullOrWhiteSpace(value) || value.IndexOf('<') >= 0;
 
-    // The same loopback set as the SDK's plain-http and test-key rules: localhost, 127.0.0.1 and ::1, over http or https.
+    // Same loopback set as the SDK: localhost, 127.0.0.1 and ::1.
     private static bool IsLoopbackUrl(string url)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
@@ -148,8 +127,7 @@ internal static class Program
     {
         try
         {
-            // One long-lived client per product. The FileStore keeps the device secret and offline lease in a
-            // per-user directory with owner-only permissions.
+            // One long-lived client per product; FileStore keeps state in an owner-only per-user directory.
             return new VelsigilClient(apiUrl, productId, publicKey, new VelsigilClientOptions
             {
                 Store = FileStore.CreateDefault("ConsoleExample"),
@@ -159,7 +137,7 @@ internal static class Program
         }
         catch (ArgumentException error)
         {
-            // A malformed URL, product id or key, or a public key of the SDK test vectors with a non-localhost URL.
+            // Also thrown for a test-vector key with a non-loopback URL.
             Console.Error.WriteLine("Invalid configuration: " + error.Message);
             return null;
         }
@@ -175,7 +153,7 @@ internal static class Program
 
         if (!result.Ok)
         {
-            // Business failures are results, not exceptions: show a helpful message and stop.
+            // Business failures are results, not exceptions.
             switch (result.Code)
             {
                 case ResultCodes.ClockSkew:
@@ -187,7 +165,7 @@ internal static class Program
                     Console.WriteLine("The license server is unreachable; connect to the internet and try again.");
                     break;
                 case ResultCodes.InternalError:
-                    // An unsigned 5xx (the server is temporarily unavailable) and no offline lease is stored.
+                    // An unsigned 5xx and no stored lease.
                     Console.WriteLine("The license server is temporarily unavailable; try again later.");
                     break;
                 case ResultCodes.InvalidResponse:
@@ -197,7 +175,7 @@ internal static class Program
             return 1;
         }
 
-        // Gate features on the verified result - never on a value the user could edit.
+        // Gate features on the verified result, never on a value the user could edit.
         Console.WriteLine(result.HasFeature("pro") ? "Pro features enabled." : "Running the standard edition.");
         if (result.Update is { UpdateAvailable: true } update)
         {
@@ -225,8 +203,7 @@ internal static class Program
         var download = grant.Download;
         if (!grant.Ok || download is null) return 1;
 
-        // The SDK writes to a temporary file and only moves it into place after the size and SHA-256
-        // match the signed values.
+        // The file is moved into place only after its size and SHA-256 match the signed values.
         var progress = new Progress<long>(bytes =>
             Console.Write("\rDownloaded  : " + (bytes * 100 / Math.Max(1, download.Size)).ToString(CultureInfo.InvariantCulture) + "%"));
         var file = await client.DownloadFileAsync(download, destination, progress, cancellationToken);

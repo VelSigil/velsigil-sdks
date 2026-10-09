@@ -162,7 +162,6 @@ public class HardwareIdTests
         Assert.Null(HardwareId.ParseIoregPlatformUuid("nothing here"));
     }
 
-    // Final sweep F-SDK-3: systemd's placeholder is not a machine id (the same rule in every SDK).
     [Fact]
     public void Linux_machine_id_skips_empty_files_and_the_systemd_placeholder()
     {

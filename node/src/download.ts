@@ -5,13 +5,7 @@ import { renameWithRetry, syncDirectory } from './fsutil.js';
 import type { FetchFunction } from './http.js';
 import type { DownloadInfo } from './result.js';
 
-/**
- * Download outcome codes (SPEC section 14 SDK-side codes, identical in every Velsigil SDK):
- * download_failed (non-200 status incl. an expired link (410), or a URL rejected by the HTTPS
- * policy), integrity_mismatch (size or SHA-256 differs from the signed values), io_error (the
- * destination could not be written), network_error (transport failure) and validation_error (bad
- * arguments).
- */
+/** Outcome codes of a release download. */
 export type DownloadFileCode =
   | 'ok'
   | 'network_error'
@@ -27,18 +21,16 @@ export interface DownloadFileResult {
   readonly message: string;
   /** Absolute destination path when `ok`. */
   readonly path: string | null;
-  /** Bytes received. */
   readonly bytes: number;
   /** Verified SHA-256 (lowercase hex) when `ok`. */
   readonly sha256: string | null;
 }
 
+/** Options of a release download. */
 export interface DownloadFileOptions {
   /** Abort when no data arrives for this many milliseconds (default 60 000). */
   idleTimeout?: number;
-  /** External cancellation. */
   signal?: AbortSignal;
-  /** Progress callback: bytes received so far and the expected total. */
   onProgress?: (received: number, total: number) => void;
 }
 
@@ -53,11 +45,7 @@ function failure(code: DownloadFileCode, message: string, bytes = 0): DownloadFi
   return Object.freeze({ ok: false, code, message, path: null, bytes, sha256: null });
 }
 
-/**
- * Streams a release to `destination`, verifying the signed `size` and `sha256` from the download
- * info while writing. Data goes to a temporary file next to the destination which is renamed into
- * place only after both checks pass; on any failure the partial file is removed.
- */
+/** Streams to a temp file and renames it into place only after the signed size and SHA-256 match. */
 export async function downloadToFile(
   download: DownloadInfo,
   destination: string,

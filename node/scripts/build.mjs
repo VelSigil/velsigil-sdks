@@ -1,7 +1,4 @@
-// Builds the dual package:
-//   dist/esm  - ES modules + .d.ts   (tsconfig.esm.json)
-//   dist/cjs  - CommonJS   + .d.ts   (tsconfig.cjs.json) with a {"type":"commonjs"} package.json marker
-// Runs the TypeScript compiler through the current Node binary (no shell involved).
+// Builds dist/esm and dist/cjs, each with a package.json "type" marker.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';

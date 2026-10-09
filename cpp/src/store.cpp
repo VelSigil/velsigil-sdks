@@ -1,5 +1,3 @@
-// Bundled IStore implementations: a process-local MemoryStore and a JSON FileStore with atomic,
-// owner-only writes.
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -34,15 +32,11 @@ using json = nlohmann::json;
 
 constexpr std::uintmax_t kMaxStoreFileBytes = 1024 * 1024;
 constexpr char kStoreFileName[] = "velsigil-license.json";
-// Legacy fallback: default file name used before the product was renamed (Veltrix -> Velsigil).
-// Only ever read, so stores written by older SDK versions keep their device secret and lease.
+// Default file name before the rename; only ever read.
 constexpr char kLegacyStoreFileName[] = "veltrix-license.json";
-
-// ---- platform file writing ------------------------------------------------------------------------
 
 #if defined(_WIN32)
 
-// String SID of the current process user, or empty when it cannot be determined.
 std::wstring current_user_sid() {
   HANDLE token = nullptr;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return {};
@@ -65,7 +59,7 @@ std::wstring current_user_sid() {
 }
 
 bool write_file_atomically(const std::filesystem::path& target, const std::filesystem::path& temp, const std::string& content) {
-  // Protected DACL: full control for the current user and SYSTEM only, no inherited ACEs.
+  // Protected DACL: the current user and SYSTEM only, no inherited ACEs.
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   SECURITY_ATTRIBUTES attributes{};
   attributes.nLength = sizeof(attributes);
@@ -130,7 +124,7 @@ void sync_directory(const std::filesystem::path& directory) {
 }
 
 bool write_file_atomically(const std::filesystem::path& target, const std::filesystem::path& temp, const std::string& content) {
-  // O_EXCL + mode 0600: the temporary file is new and readable/writable by the owner only.
+  // O_EXCL + 0600: a new file only the owner can read and write.
   const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
   if (fd < 0) return false;
   bool ok = write_all(fd, content) && ::fsync(fd) == 0;
@@ -169,9 +163,7 @@ bool save_document(const std::filesystem::path& target, const json& document) {
   return write_file_atomically(target, temp, document.dump(2, ' ', false, json::error_handler_t::replace));
 }
 
-// Missing, oversized or corrupt files read as an empty document (the next write replaces them). A file
-// that exists but cannot be read (permissions, a lock, an I/O error) sets `readable` to false: its
-// content is unknown, never "empty", so no write may be built on it.
+// Missing, oversized or corrupt files read as empty; an unreadable file sets `readable` to false.
 json load_document(const std::filesystem::path& path, bool& readable) {
   readable = true;
   std::error_code ec;
@@ -204,9 +196,7 @@ json load_document(const std::filesystem::path& path, bool& readable) {
   return document;
 }
 
-// Reads `path`; while it does not exist (and a legacy file name is configured), reads the legacy file
-// instead. Writes always go to `path`, so the first write migrates the data and later reads ignore
-// the legacy file.
+// Reads the legacy file while `path` does not exist; the first write migrates the data.
 json load_document_or_legacy(const std::filesystem::path& path, const std::filesystem::path& legacy_path, bool& readable) {
   if (!legacy_path.empty()) {
     std::error_code ec;
@@ -226,8 +216,6 @@ bool is_valid_app_name(std::string_view name) noexcept {
 }
 
 }  // namespace
-
-// ---- MemoryStore ---------------------------------------------------------------------------------
 
 std::optional<std::string> MemoryStore::get(const std::string& product_id, const std::string& key) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -253,11 +241,10 @@ bool MemoryStore::erase(const std::string& product_id, const std::string& key) {
   return true;
 }
 
-// ---- FileStore -----------------------------------------------------------------------------------
 // Layout: { "version": 1, "products": { "<productId>": { "deviceSecret": "...", "lease": "..." } } }
 
 FileStore::FileStore(std::filesystem::path path) : path_(std::move(path)) {
-  // Only a store at the default file name migrates from the legacy default file next to it.
+  // Only the default file name migrates from the legacy file next to it.
   try {
     if (path_.filename() == std::filesystem::path(kStoreFileName)) {
       legacy_path_ = path_.parent_path() / kLegacyStoreFileName;
@@ -308,7 +295,7 @@ std::optional<std::string> FileStore::get(const std::string& product_id, const s
   } catch (...) {
     readable = false;
   }
-  // Never report an unreadable file as "nothing stored" (the Client catches this and fails closed).
+  // Never report an unreadable file as "nothing stored"; the Client fails closed.
   if (!readable) throw std::runtime_error("the license store file cannot be read");
   try {
     const auto products = document.find("products");

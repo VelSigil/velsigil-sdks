@@ -7,13 +7,11 @@ export interface EnvelopeVector {
   envelope: { data: string; sig?: string; kid?: string };
   payload?: Record<string, unknown>;
   requestNonce: string;
-  /** The endpoint the request went to: the signed payload `type` must match it. */
   requestType: RequestType;
   productId: string;
-  /** Present for answers to a device-bound request: the hwid that request was sent with. */
   hwid?: string;
   expect: 'valid' | 'invalid_signature' | 'nonce_mismatch' | 'product_mismatch' | 'type_mismatch' | 'hwid_mismatch';
-  /** Dotted paths of fields this protocol version does not know: a parser ignores them (forward compatibility). */
+  /** Dotted paths of fields a parser must ignore. */
   unknownFields?: string[];
 }
 
@@ -25,11 +23,10 @@ export interface LeaseVector {
   productId: string;
   expect: 'valid' | 'expired' | 'invalid_signature' | 'product_mismatch' | 'hwid_mismatch' | 'malformed';
   payload?: Record<string, unknown>;
-  /** Dotted paths of fields this protocol version does not know (see EnvelopeVector). */
   unknownFields?: string[];
 }
 
-/** A deep copy of `payload` without the vector's `unknownFields` (what a parser of this version keeps). */
+/** A deep copy of `payload` without `unknownFields`. */
 export function knownPayload(payload: Record<string, unknown>, unknownFields: readonly string[] = []): Record<string, unknown> {
   const copy = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>;
   for (const path of unknownFields) {
@@ -65,7 +62,7 @@ export interface TestVectors {
   };
 }
 
-/** sdks/test-vectors.json - the canonical, generated protocol vectors shared by every SDK. */
+/** sdks/test-vectors.json, shared by every SDK. */
 export const vectors: TestVectors = JSON.parse(
   readFileSync(fileURLToPath(new URL('../../../test-vectors.json', import.meta.url)), 'utf8'),
 ) as TestVectors;

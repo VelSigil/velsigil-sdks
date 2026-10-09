@@ -7,53 +7,28 @@ namespace Velsigil.Client;
 /// <summary>Optional settings for <see cref="VelsigilClient"/>. Values are copied when the client is created.</summary>
 public sealed class VelsigilClientOptions
 {
-    /// <summary>
-    /// Per-request timeout (default 15 s, allowed range 1 s to 10 min). For file downloads it is applied
-    /// to the response headers and as an inactivity timeout between reads.
-    /// </summary>
+    /// <summary>Per-request timeout (default 15 s, 1 s to 10 min); for downloads also the inactivity timeout.</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(15);
 
-    /// <summary>
-    /// Overrides the hardware id sent to the server (8..256 characters). By default the SDK derives it
-    /// from the OS machine id (<see cref="Velsigil.Client.HardwareId.Get"/>). Use a stable value: changing it makes
-    /// the server see a new device.
-    /// </summary>
+    /// <summary>Overrides the hardware id (8..256 characters). Keep it stable: a new value is a new device.</summary>
     public string? HardwareId { get; set; }
 
-    /// <summary>
-    /// Where the device secret and offline lease are persisted. Default: a <see cref="FileStore"/> in
-    /// the per-user application data directory (falls back to <see cref="MemoryStore"/> when no such
-    /// directory exists).
-    /// </summary>
+    /// <summary>Where the device secret and lease are stored. Default: a per-user <see cref="FileStore"/>.</summary>
     public IVelsigilStore? Store { get; set; }
 
-    /// <summary>
-    /// Allows plain <c>http://</c> to hosts other than localhost / 127.0.0.1 / ::1. Never enable this in
-    /// production: license keys and device secrets would travel in clear text.
-    /// </summary>
+    /// <summary>Allows plain <c>http://</c> to non-loopback hosts. Never enable in production.</summary>
     public bool AllowInsecureHttp { get; set; }
 
     /// <summary>
-    /// An externally owned <see cref="System.Net.Http.HttpClient"/> (proxies, certificate pinning, Unity
-    /// handlers...). The client never disposes it. When null the SDK creates its own client with
-    /// redirects and cookies disabled.
-    /// <para>
-    /// Build an injected client on a handler with <c>AllowAutoRedirect = false</c> (the .NET default is
-    /// <c>true</c>). The SDK rejects any answer that does not come from the URI it requested
-    /// (<c>invalid_response</c>, or <c>download_failed</c> for downloads), but a handler that follows a
-    /// 307/308 redirect has already re-sent the request body (license key, device secret) to the new
-    /// location by then.
-    /// </para>
+    /// An externally owned <see cref="System.Net.Http.HttpClient"/>; the client never disposes it.
+    /// Build it with <c>AllowAutoRedirect = false</c>, or a redirect re-sends the license key elsewhere.
     /// </summary>
     public HttpClient? HttpClient { get; set; }
 
     /// <summary>Clock used for request timestamps and offline lease expiry. Default: system UTC clock.</summary>
     public Func<DateTimeOffset>? Clock { get; set; }
 
-    /// <summary>
-    /// Invoked (never with secrets in the message) when the store fails to read or write. Store failures
-    /// never fail a validation; without persistence the device secret is simply not remembered.
-    /// </summary>
+    /// <summary>Called when the store fails to read or write; store failures never fail a validation.</summary>
     public Action<Exception>? StoreErrorHandler { get; set; }
 }
 
@@ -76,10 +51,6 @@ public sealed class StartTrialOptions
     /// <summary>A human-friendly device name shown to the seller and customer (max 255 chars).</summary>
     public string? DeviceName { get; set; }
 
-    /// <summary>
-    /// The customer's e-mail address (max 254 chars). Sent only when set, and read only when the seller's trial
-    /// offer confirms an address first: the answer is then <see cref="ResultCodes.TrialConfirmationSent"/> and the
-    /// key arrives by e-mail.
-    /// </summary>
+    /// <summary>The customer's e-mail (max 254 chars), used only when the trial offer confirms an address.</summary>
     public string? Email { get; set; }
 }

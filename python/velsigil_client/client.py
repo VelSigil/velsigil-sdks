@@ -1,14 +1,4 @@
-"""Velsigil license client (SPEC sections 10 and 14).
-
-Security model in one paragraph: every response that can report success is
-an Ed25519-signed envelope. The client verifies the signature over the exact
-bytes it received *before* parsing, using only the public key it was
-constructed with, then checks that the payload echoes the request's fresh
-nonce, this product id and the request type, and that a signed lease or
-activation describes this device (hwid). Unsigned HTTP errors are mapped to failure codes
-and can never produce ``ok=True``. Request methods never raise; they return
-a :class:`~velsigil_client.models.VelsigilResult`.
-"""
+"""Velsigil license client; every success is a verified, signed answer."""
 
 from __future__ import annotations
 
@@ -68,20 +58,12 @@ SDK_VERSION = "1.0.4"
 
 API_PATH = "/api/client/v1"
 DEFAULT_TIMEOUT = 15.0
-#: Responses larger than this are rejected (the protocol's are a few KiB).
 MAX_RESPONSE_BYTES = 1024 * 1024
-#: Server-side limit for license key input (SPEC 3.2 ``licenseKeyInput``).
 MAX_LICENSE_KEY_LENGTH = 64
-#: Longest e-mail address ``start_trial`` sends (the server's ``email`` schema).
 MAX_EMAIL_LENGTH = 254
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-#: The two public keys of the shared SDK test vectors (``test-vectors.json``:
-#: ``keys.publicKey`` and ``keys.wrongPublicKey``), as raw 32-byte keys. Their
-#: private seeds are published next to them, so anyone can sign "valid" answers
-#: for them. The constructor refuses them unless ``api_url`` is loopback; the
-#: public helpers in :mod:`velsigil_client.crypto` refuse them always (through
-#: ``crypto._is_published_test_key``). Internal, not part of the public API.
+# Public keys of the SDK test vectors; their private keys are published, so anyone can forge answers.
 _PUBLISHED_TEST_PUBLIC_KEYS = frozenset(
     base64.b64decode(key)
     for key in (
@@ -96,17 +78,12 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 _DEVICE_SECRET_RE = re.compile(r"^[\x21-\x7e]{16,256}\Z")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}\Z")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
-#: A license key as the server issues it: 1-64 printable ASCII characters.
 _TRIAL_KEY_RE = re.compile(r"^[\x21-\x7e]{1,64}\Z")
-#: ``Retry-After`` as delta-seconds (ASCII digits only; ``str.isdigit`` would accept other digits).
+# ASCII digits only: str.isdigit would accept other Unicode digits.
 _DELTA_SECONDS_RE = re.compile(r"^[0-9]+\Z")
-#: Upper bound of ``VelsigilResult.retry_after``: one day.
 _MAX_RETRY_AFTER = 86400
 
-#: Signed denials after which a stored offline lease must no longer be used.
-#: This exact set is binding for every Velsigil SDK (SPEC 14); any other
-#: signed failure (product_paused, outdated_version, activation_rate_limited,
-#: clock_skew, replay_detected, ...) keeps the lease.
+#: Signed denials after which the stored offline lease is no longer honoured.
 LEASE_REVOKING_CODES = frozenset(
     {
         Code.INVALID_KEY,
@@ -150,16 +127,12 @@ _UNSIGNED_MESSAGES = {
     ),
 }
 
-#: ``already_licensed`` (SPEC 14): ``start_trial`` on a device that already
-#: holds a license (stored device secret or lease) for the product.
 _ALREADY_LICENSED_MESSAGE = (
     "This device already holds a license for this product (a stored device secret or offline lease); "
     "a free trial cannot replace it. Validate the saved license key instead, or call deactivate() or "
     "clear_stored_state() first. No request was sent."
 )
 
-#: ``store_unavailable`` (SPEC 14): ``start_trial`` could not read the store,
-#: so it cannot tell whether a license is stored for the product.
 _STORE_UNAVAILABLE_MESSAGE = (
     "The license store could not be read, so it is unknown whether this device already holds a license for this "
     "product; a free trial was not started. Try again once the store can be read. No request was sent."
@@ -171,11 +144,7 @@ class _NetworkFailure(Exception):
 
 
 class _ResponseTooLarge(Exception):
-    """The response body exceeded :data:`MAX_RESPONSE_BYTES`.
-
-    ``status`` and ``headers`` are those of that response (``None`` when
-    unknown): an oversized 429 or 503 still carries its ``Retry-After``.
-    """
+    """Keeps status and headers so an oversized 429/503 still yields its ``Retry-After``."""
 
     def __init__(self, status: Optional[int] = None, headers: Any = None) -> None:
         super().__init__()
@@ -184,22 +153,14 @@ class _ResponseTooLarge(Exception):
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Never follow redirects: a 3xx surfaces as an HTTPError instead.
-
-    Following a redirect could downgrade to plain HTTP or forward the license
-    key to another host; the protocol never redirects.
-    """
+    """A redirect could downgrade to plain HTTP or send the license key to another host."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         return None
 
 
 def _build_opener(context: ssl.SSLContext) -> urllib.request.OpenerDirector:
-    """An opener limited to HTTP(S): no file:, ftp: or data: handlers, no redirects.
-
-    System proxy settings (``HTTPS_PROXY`` etc.) are honoured; TLS is still
-    verified end to end through a proxy.
-    """
+    """HTTP(S) only (no file:, ftp: or data:), no redirects; system proxies are honoured."""
     opener = urllib.request.OpenerDirector()
     for handler in (
         urllib.request.ProxyHandler(),
@@ -224,7 +185,7 @@ def _never_raise(method: _F) -> _F:
         try:
             return method(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - deliberate: request methods never raise
-            # Only the exception type is logged: messages could echo inputs.
+            # Log only the exception class; messages could echo inputs.
             _log.error("unexpected %s in VelsigilClient.%s", type(exc).__name__, method.__name__)
             return _failure(Code.INVALID_RESPONSE, "Unexpected client error while processing the response.")
 
@@ -272,34 +233,18 @@ def _validate_hwid(hwid: Any) -> str:
 
 
 class VelsigilClient:
-    """Client for the Velsigil license server.
+    """Client for the Velsigil license server. Request methods never raise.
 
-    :param api_url: Base URL of the Velsigil server, e.g.
-        ``https://licenses.example.com`` (``/api/client/v1`` is appended unless
-        already present). HTTPS is required except for localhost.
+    :param api_url: Your Velsigil server URL; HTTPS is required except for localhost.
     :param product_id: The product's UUID.
-    :param public_key: The product's Ed25519 public key (standard base64).
-        Embed it in your application; it is the only key that is trusted.
-        The public test keys of the SDK test vectors are refused unless
-        ``api_url`` is a loopback host (localhost, 127.0.0.1, ::1).
+    :param public_key: The product's public key; embed it in your app, never load it from config.
     :param timeout: Per-request timeout in seconds (default 15).
-    :param hwid: Override the hardware id (8..256 characters). By default it
-        is derived from the OS machine id (:meth:`get_hardware_id`).
-    :param store: Where the device secret and offline lease are persisted.
-        Defaults to a :class:`~velsigil_client.store.MemoryStore`; use a
-        :class:`~velsigil_client.store.FileStore` in production.
-    :param allow_insecure_http: Permit plain HTTP to non-local hosts. Never
-        enable this in production.
-    :param ssl_context: Custom :class:`ssl.SSLContext` (e.g. a private CA).
-        Certificate and hostname verification must stay enabled.
-    :param clock: Callable returning the current unix time in seconds
-        (default :func:`time.time`); useful for tests.
+    :param hwid: Hardware id override (8..256 characters).
+    :param store: Persistence for the device secret and lease; use a ``FileStore`` in production.
+    :param allow_insecure_http: Permit plain HTTP to non-local hosts. Never enable in production.
+    :param ssl_context: Custom :class:`ssl.SSLContext`; verification must stay enabled.
+    :param clock: Callable returning the current unix time in seconds.
     :param crypto_backend: ``"auto"``, ``"cryptography"`` or ``"nacl"``.
-
-    The constructor raises :class:`~velsigil_client.errors.ConfigurationError`
-    (bad arguments), :class:`~velsigil_client.errors.CryptoBackendError` or
-    :class:`~velsigil_client.errors.HardwareIdError`. Request methods never
-    raise.
     """
 
     def __init__(
@@ -324,9 +269,7 @@ class VelsigilClient:
             raise ConfigurationError("product_id must be a UUID string")
         self._product_id = product_id.strip().lower()
 
-        # The internal verifier: the public Ed25519Verifier refuses the published test keys
-        # unconditionally, the client allows them for a loopback api_url (the same hosts that may use
-        # plain HTTP). The decoded key bytes are compared, so no other encoding of a test key gets through.
+        # Test keys are allowed only for a loopback api_url; this is the only check.
         self._verifier = _new_verifier(public_key, backend=crypto_backend)
         if _is_published_test_key(self._verifier.public_key_bytes) and not _is_local_host(
             urllib.parse.urlsplit(self._base_url).hostname
@@ -359,22 +302,18 @@ class VelsigilClient:
             platform.python_version(),
         )
 
-        # _op_lock serialises stateful operations (device secret / lease
-        # read-modify-write); _state_lock guards the small shared fields.
+        # _op_lock serialises the store read-modify-write; _state_lock guards the small fields.
         self._op_lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._clock_offset = 0
         self._cached_state = StoredState()
-        # False until the store was read or written once: until then the
-        # cache is a placeholder, never "nothing stored".
+        # Until the store was read or written once, the cache is only a placeholder.
         self._state_known = False
         self._unsaved = False
 
-    # ------------------------------------------------------------------ info
-
     @property
     def api_url(self) -> str:
-        """Normalised client API base URL (``…/api/client/v1``)."""
+        """Normalised client API base URL."""
         return self._base_url
 
     @property
@@ -394,12 +333,12 @@ class VelsigilClient:
 
     @property
     def key_id(self) -> str:
-        """Key id of the trusted public key (for display/diagnostics only)."""
+        """Key id of the trusted public key, for diagnostics."""
         return self._verifier.key_id
 
     @staticmethod
     def get_hardware_id() -> str:
-        """This machine's HWID (SPEC 10.6). Raises ``HardwareIdError`` on failure."""
+        """This machine's HWID; raises ``HardwareIdError`` on failure."""
         return _detect_hardware_id()
 
     def __repr__(self) -> str:
@@ -408,8 +347,6 @@ class VelsigilClient:
             self._product_id,
             self._verifier.key_id,
         )
-
-    # ------------------------------------------------------------ operations
 
     @_never_raise
     def validate(
@@ -440,26 +377,7 @@ class VelsigilClient:
         device_name: Optional[str] = None,
         email: Optional[str] = None,
     ) -> VelsigilResult:
-        """Start a free trial of the product on this device, without a license key.
-
-        SPEC 9.7 "In-app trials": the seller turns on the in-app channel of
-        the product's trial offer. On ``ok``, ``result.trial_key`` is the new
-        license key: store it right away (the server can never send it again;
-        the SDK does not persist it) and use :meth:`validate` from then on.
-        The device secret and the offline lease are stored like after a
-        validation. ``email`` is sent only when given and read only by offers
-        that confirm an address first (answer ``trial_confirmation_sent``: the
-        key arrives by e-mail). Other signed failures: ``trial_already_used``,
-        ``trial_unavailable``, ``trial_email_required``, ``trial_email_invalid``,
-        ``trial_email_not_accepted``; ``panel_too_old`` when the server
-        predates in-app trials. Call it only when the app has no key yet: when
-        a device secret or an offline lease is already stored for the product
-        it returns ``already_licensed`` without sending anything and leaves the
-        stored state untouched, so a trial never replaces this device's
-        license. When the store cannot be read it returns ``store_unavailable``
-        (nothing sent): it cannot tell whether a license is stored. Never
-        raises.
-        """
+        """Start a free trial without a key. The server sends ``result.trial_key`` only once; store it."""
         problem = _input_problem(version=version, device_name=device_name, require_key=False)
         if problem is not None:
             return problem
@@ -467,13 +385,10 @@ class VelsigilClient:
             if not isinstance(email, str) or len(email.strip()) > MAX_EMAIL_LENGTH or _CONTROL_CHARS_RE.search(email):
                 return _failure(Code.VALIDATION_ERROR, "email must be a string of at most 254 characters.")
         with self._op_lock:
-            # The trial answer would overwrite the stored device secret and lease
-            # of this device's license (a paid one included). Checked under the
-            # operation lock, so no concurrent validate can slip in between.
+            # A trial must not overwrite this device's license; the lock keeps validate out meanwhile.
             state, readable = self._read_state()
             if not readable:
-                # A failed read is not "nothing stored": the store may hold this
-                # device's (paid) license. Fail closed.
+                # Fail closed: an unreadable store may hold a paid license.
                 return _failure(Code.STORE_UNAVAILABLE, _STORE_UNAVAILABLE_MESSAGE)
             if state.device_secret or state.lease_token:
                 return _failure(Code.ALREADY_LICENSED, _ALREADY_LICENSED_MESSAGE)
@@ -486,7 +401,6 @@ class VelsigilClient:
                 fields["email"] = email.strip()
             result, payload = self._round_trip("trial", "trial", fields)
             if payload is not None:
-                # A started trial is a validation of the new license on this device: same storage rules.
                 self._absorb_validate(result, payload)
             return result
 
@@ -501,8 +415,6 @@ class VelsigilClient:
             result, payload = self._round_trip("deactivate", "deactivate", fields)
             if payload is not None:
                 if result.ok or result.code == Code.DEVICE_NOT_FOUND:
-                    # The server no longer knows this device: its secret and
-                    # lease are worthless now.
                     self._save_state(StoredState())
                 else:
                     self._absorb_common(result, payload)
@@ -522,11 +434,7 @@ class VelsigilClient:
 
     @_never_raise
     def get_download(self, license_key: str, version: Optional[str] = None) -> VelsigilResult:
-        """Request a short-lived download link (``result.download``).
-
-        Requires an already activated device when the product locks HWIDs.
-        Use :meth:`download_to_file` to fetch and integrity-check the file.
-        """
+        """Request a short-lived download link (``result.download``)."""
         problem = _input_problem(license_key, version)
         if problem is not None:
             return problem
@@ -553,12 +461,7 @@ class VelsigilClient:
 
     @_never_raise
     def validate_offline(self) -> VelsigilResult:
-        """Validate the stored offline lease without contacting the server.
-
-        Checks the lease signature, type, product, HWID and expiry against the
-        local clock (plus any learned server offset). Clock tampering is a
-        known limitation of offline validation.
-        """
+        """Validate the stored offline lease without contacting the server."""
         state = self._load_state()
         token = state.lease_token
         if not token:
@@ -602,32 +505,11 @@ class VelsigilClient:
         version: Optional[str] = None,
         device_name: Optional[str] = None,
     ) -> VelsigilResult:
-        """Validate online; fall back to the stored lease only while the server is unavailable.
-
-        "Unavailable" means no HTTP answer at all (``network_error``: DNS,
-        connect, TLS, timeout, reset) or an unsigned HTTP 5xx answer, whatever
-        its body (a Velsigil error such as ``internal_error`` while the
-        server's database is down, a proxy's HTML error page, an empty or
-        garbled body). Every other answer is returned as is: signed answers
-        (``license_revoked``, ``license_expired``, ...), unsigned 4xx
-        (``rate_limited``, ``validation_error``, ...), redirects and
-        ``invalid_response`` on an HTTP 200. When it falls back, the result is
-        that of :meth:`validate_offline`: ``ok`` (``offline=True``) for a usable
-        lease, ``lease_expired`` or ``lease_invalid`` (``offline=True``) for a
-        stored lease that cannot be used (kept or removed exactly as by
-        :meth:`validate_offline`), and the original online failure
-        (``network_error``, ``internal_error``, ...) when no lease is stored at
-        all, not ``no_lease``. A result of the fallback (``ok`` offline,
-        ``lease_expired``, ``lease_invalid``) carries the ``retry_after`` of the
-        failed online attempt (the ``Retry-After`` of a 503, else ``None``), so
-        the app knows when to try online again. :meth:`validate` itself never
-        falls back.
-        """
+        """Validate online; use the offline lease only if there is no response or an unsigned 5xx."""
         online = self.validate(license_key, version=version, device_name=device_name)
         if not _server_unavailable(online):
             return online
         offline = self.validate_offline()
-        # Without any stored lease the original failure (network_error, internal_error, ...) is more useful.
         if offline.code == Code.NO_LEASE:
             return online
         return dataclasses.replace(offline, retry_after=online.retry_after)
@@ -638,13 +520,9 @@ class VelsigilClient:
             self._save_state(StoredState())
 
     def download_to_file(self, download: DownloadInfo, destination: str) -> str:
-        """Fetch a release to ``destination`` and verify its signed size and SHA-256.
+        """Download a release, verify its signed size and SHA-256, and return the path.
 
-        The file is streamed to a temporary file in the destination directory
-        and only moved into place when both checks pass, so a tampered or
-        truncated download never appears at ``destination``. Returns the
-        absolute destination path. Raises
-        :class:`~velsigil_client.errors.DownloadError` on any failure.
+        Raises :class:`~velsigil_client.errors.DownloadError` on any failure.
         """
         if not isinstance(download, DownloadInfo):
             raise DownloadError("download must be a DownloadInfo from get_download()", Code.VALIDATION_ERROR)
@@ -694,7 +572,6 @@ class VelsigilClient:
                                 raise DownloadError("cannot write the destination file", Code.IO_ERROR) from exc
                 except urllib.error.HTTPError as exc:
                     exc.close()
-                    # 410: the short-lived link expired; request a new one.
                     raise DownloadError("download failed with HTTP %d" % exc.code, Code.DOWNLOAD_FAILED) from None
                 except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
                     raise DownloadError("download failed: %s" % type(exc).__name__, Code.NETWORK_ERROR) from None
@@ -712,8 +589,6 @@ class VelsigilClient:
             _unlink_quietly(tmp_path)
             raise DownloadError("cannot write the destination file", Code.IO_ERROR) from exc
         return target
-
-    # ------------------------------------------------------------- internals
 
     def _now(self) -> float:
         with self._state_lock:
@@ -763,8 +638,7 @@ class VelsigilClient:
         except _NetworkFailure as exc:
             return _failure(Code.NETWORK_ERROR, "Could not reach the license server (%s)." % exc), None
         except _ResponseTooLarge as exc:
-            # The status is kept: an oversized 5xx (e.g. a proxy error page) is still an unsigned 5xx
-            # answer, which lets validate_with_offline_fallback use the stored lease.
+            # Keep the status: an oversized 5xx still triggers the offline fallback.
             return (
                 _failure(
                     Code.INVALID_RESPONSE,
@@ -783,7 +657,6 @@ class VelsigilClient:
         except (ValueError, UnicodeDecodeError):
             return _failure(Code.INVALID_RESPONSE, _UNSIGNED_MESSAGES[Code.INVALID_RESPONSE], http_status=status), None
         try:
-            # Device-bound requests carry "hwid": the signed lease/activation must then belong to it.
             hwid = body.get("hwid")
             payload = _open_envelope(
                 self._verifier,
@@ -850,14 +723,8 @@ class VelsigilClient:
         except (http.client.HTTPException, OSError, ValueError) as err:
             raise _NetworkFailure(type(err).__name__) from None
 
-    # -- stored state ---------------------------------------------------------
-
     def _read_state(self) -> Tuple[StoredState, bool]:
-        """The stored state, and whether it was read: ``False`` when the store
-        failed, the state is then the last one this client read or wrote
-        (empty before the first), which must never count as "nothing stored".
-        After a failed save the in-memory state is newer than the store and
-        counts as read."""
+        """Returns (state, readable); an unreadable store must never count as "nothing stored"."""
         with self._state_lock:
             if self._unsaved:
                 return self._cached_state, True
@@ -878,10 +745,7 @@ class VelsigilClient:
         return self._read_state()[0]
 
     def _merge_base(self) -> Optional[StoredState]:
-        """The state an answer is merged into: a fresh read of the store, else
-        the last state this client read or wrote; ``None`` while the store has
-        never been readable (then only a newly issued secret may be written,
-        never a state built on an unknown one)."""
+        """``None`` while the store has never been readable: then only a new secret may be written."""
         state, readable = self._read_state()
         if readable:
             return state
@@ -923,7 +787,7 @@ class VelsigilClient:
         current = self._merge_base()
         if current is None:
             if issued is None:
-                return  # the store is unreadable: never write a state built on nothing
+                return
             current = StoredState()
         secret = issued or current.device_secret
         lease = current.lease_token
@@ -934,13 +798,7 @@ class VelsigilClient:
             self._save_state(updated)
 
     def _absorb_validate(self, result: VelsigilResult, payload: Mapping[str, Any]) -> None:
-        """Persist secret and lease from a signed validate response.
-
-        The answer is merged into a fresh read of the store. While the store
-        cannot be read (and never was), nothing is written except a newly
-        issued device secret, which belongs to a new activation: a failed read
-        must never erase the stored secret of this device.
-        """
+        """Persist secret and lease from a signed validate response."""
         issued = self._new_device_secret(payload)
         current = self._merge_base()
         if current is None:
@@ -957,12 +815,8 @@ class VelsigilClient:
                 except LeaseError as exc:
                     _log.warning("not storing offline lease from server: %s", exc.reason)
         elif result.code in _LEASE_REVOKING_CODES:
-            # A signed, definitive denial: the license may no longer be used
-            # offline either.
             lease = None
         else:
-            # Signed but not definitive (paused product, outdated version,
-            # activation limits, clock skew, replay ...): keep the lease.
             lease = current.lease_token
         updated = StoredState(device_secret=secret, lease_token=lease)
         if updated != current:
@@ -984,34 +838,12 @@ class VelsigilClient:
         return None
 
 
-# --------------------------------------------------------------------------- #
-# Module helpers
-# --------------------------------------------------------------------------- #
-
-
 def _server_unavailable(result: VelsigilResult) -> bool:
-    """Whether ``result`` says the license server is unavailable (not that it refused the request).
-
-    True for ``network_error`` (no HTTP answer, or a 502/503/504 without a
-    Velsigil error body) and for any other unsigned HTTP 5xx answer
-    (``http_status`` 500-599, whatever its body or code, typically
-    ``internal_error``). Signed answers always arrive with HTTP 200, so a
-    signed denial is never "unavailable"; neither are unsigned 4xx answers
-    (``rate_limited``, ``validation_error``, ...), redirects or
-    ``invalid_response`` on an HTTP 200. These are exactly the results on
-    which :meth:`VelsigilClient.validate_with_offline_fallback` uses the
-    stored offline lease.
-
-    Falling back on an unsigned 5xx gives an attacker on the network nothing
-    new: one who can inject such an answer can as well drop the connection,
-    which already means ``network_error``; and the lease itself is signed,
-    bound to this device and time-limited.
-    """
+    """No HTTP answer or an unsigned 5xx; safe, as an attacker could just drop the connection."""
     if result.ok or result.offline:
         return False
     status = result.http_status
     if status is None:
-        # No HTTP answer at all (a signed answer always carries http_status 200, so it never gets here).
         return result.code == Code.NETWORK_ERROR
     return isinstance(status, int) and 500 <= status <= 599
 
@@ -1024,7 +856,6 @@ def _unlink_quietly(path: str) -> None:
 
 
 def _read_capped(stream: Any, deadline: float) -> bytes:
-    """Read a response body, enforcing the size cap and an overall deadline."""
     chunks = []
     total = 0
     while True:
@@ -1047,11 +878,7 @@ def _input_problem(
     *,
     require_key: bool = True,
 ) -> Optional[VelsigilResult]:
-    """Client-side input checks mirroring the server's limits (UX only).
-
-    Returns a ``validation_error`` result instead of raising, so callers can
-    pass user-entered values straight through.
-    """
+    """Mirrors the server's input limits; returns a ``validation_error`` result instead of raising."""
     if require_key:
         if not isinstance(license_key, str) or not license_key.strip():
             return _failure(Code.VALIDATION_ERROR, "A license key is required.")
@@ -1074,16 +901,7 @@ def _sanitize_request_id(value: Any) -> Optional[str]:
 
 
 def _retry_after(status: Optional[int], headers: Any, now: float) -> Optional[int]:
-    """Seconds to wait from the ``Retry-After`` header of an HTTP 429 or 503 answer (SPEC 14, every SDK).
-
-    Every 429 and 503 counts, whatever code it maps to: ``rate_limited``,
-    ``network_error`` for the server's empty 503 while its database is
-    unreachable (CLIENT_PROTOCOL 5.3) or a gateway's 503, the code of a
-    Velsigil error body such as 503 ``service_busy``. Delta-seconds or an
-    HTTP-date (rounded up, measured from ``now``, the local clock), clamped to
-    0..86400 (one day). ``None`` for every other status and when the header is
-    absent or unparseable.
-    """
+    """``Retry-After`` of a 429 or 503 in whole seconds, capped at one day."""
     if status not in (429, 503):
         return None
     try:
@@ -1102,17 +920,13 @@ def _retry_after(status: Optional[int], headers: Any, now: float) -> Optional[in
             when = when.replace(tzinfo=datetime.timezone.utc)
         seconds = math.ceil(when.timestamp() - now)
     except Exception:  # noqa: BLE001 - email.utils on odd input (some 3.x releases raise more than ValueError)
-        # Never let a malformed header break the result: an exception here would turn a 503 into an
-        # invalid_response without http_status, which validate_with_offline_fallback does not fall back on.
+        # Raising here would turn a 503 into invalid_response and skip the offline fallback.
         return None
     return max(0, min(seconds, _MAX_RETRY_AFTER))
 
 
 def _code_for_status(status: int, velsigil_body: bool) -> str:
-    """Status fallback when an unsigned body carries no known code (SPEC 14, same in every SDK).
-
-    ``velsigil_body``: the body is a Velsigil error object (``{"error": {"code": ...}}``).
-    """
+    """Used when an unsigned body has no known code; the same mapping in every Velsigil SDK."""
     if status == 400:
         return Code.VALIDATION_ERROR
     if status == 413:
@@ -1122,10 +936,7 @@ def _code_for_status(status: int, velsigil_body: bool) -> str:
     if status == 429:
         return Code.RATE_LIMITED
     if status in (502, 503, 504):
-        # A gateway in front of Velsigil could not reach it: report it like an
-        # unreachable server unless Velsigil itself answered with an error
-        # body. (validate_with_offline_fallback falls back on every unsigned
-        # 5xx either way, see _server_unavailable.)
+        # Without a Velsigil error body this is a gateway that cannot reach the server.
         return Code.INTERNAL_ERROR if velsigil_body else Code.NETWORK_ERROR
     if 500 <= status <= 599:
         return Code.INTERNAL_ERROR
@@ -1135,11 +946,7 @@ def _code_for_status(status: int, velsigil_body: bool) -> str:
 def _unsigned_error(
     status: int, raw: bytes, headers: Any, response_type: Optional[str] = None, now: Optional[float] = None
 ) -> VelsigilResult:
-    """Map an unsigned (non-200) response to a failure. Never yields ok=True.
-
-    ``now``: the client's local clock (unix seconds) for an HTTP-date
-    ``Retry-After``; the system clock when omitted.
-    """
+    """Map an unsigned (non-200) response to a failure. Never yields ok=True."""
     code: Optional[str] = None
     request_id: Optional[str] = None
     velsigil_body = False
@@ -1153,7 +960,7 @@ def _unsigned_error(
         if error["code"] in UNSIGNED_ERROR_CODES:
             code = error["code"]
         elif response_type == "trial" and status == 404 and error["code"] == "not_found":
-            # A Velsigil server without the in-app trial endpoint answers its generic 404 (SPEC 14).
+            # Servers without the trial endpoint answer a generic 404.
             code = Code.PANEL_TOO_OLD
         request_id = _sanitize_request_id(error.get("requestId"))
     if request_id is None and headers is not None:
@@ -1178,9 +985,7 @@ def _optional(payload: Mapping[str, Any], key: str, parser: Callable[[Any], Any]
 
 
 def _trial_key(payload: Mapping[str, Any]) -> Optional[str]:
-    """The key of a started trial (SPEC 10.1): required on an ``ok`` answer of
-    type ``trial`` (raises ValueError when missing or malformed), never read
-    from any other answer."""
+    """Only an ``ok`` trial answer may carry a key, and there it is required."""
     if payload.get("type") != "trial" or payload.get("ok") is not True:
         return None
     trial = payload.get("trial")
@@ -1191,13 +996,13 @@ def _trial_key(payload: Mapping[str, Any]) -> Optional[str]:
 
 
 def _result_from_payload(payload: Mapping[str, Any]) -> VelsigilResult:
-    """Build a result from a *verified* payload (raises ValueError on bad types)."""
+    """Build a result from a verified payload (raises ValueError on bad types)."""
     message = payload.get("message")
     return VelsigilResult(
         ok=payload["ok"] is True,
         code=payload["code"],
         message=message if isinstance(message, str) else "",
-        # Only an ok answer grants features through the license-level helper too (MONEY-V1).
+        # Only an ok answer may grant features, also through LicenseInfo.has_feature.
         license=_optional(payload, "license", lambda value: LicenseInfo.from_payload(value, granted=payload["ok"] is True)),
         activation=_optional(payload, "activation", ActivationInfo.from_payload),
         lease=_optional(payload, "lease", LeaseInfo.from_payload),
@@ -1228,7 +1033,6 @@ def _claim_opt_int(claims: Mapping[str, Any], key: str) -> Optional[int]:
 
 
 def _claim_trial(claims: Mapping[str, Any]) -> bool:
-    """The optional signed ``trial`` flag of a lease (SPEC 9.7): absent/null -> False."""
     value = claims.get("trial")
     if value is None:
         return False

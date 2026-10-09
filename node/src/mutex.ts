@@ -1,4 +1,3 @@
-/** Tiny FIFO async mutex: tasks passed to `run` execute one at a time, in call order. */
 export class Mutex {
   #tail: Promise<unknown> = Promise.resolve();
 

@@ -1,4 +1,3 @@
-// Cryptographic primitives, all provided by libsodium (no custom cryptography).
 #include <sodium.h>
 
 #include <algorithm>
@@ -13,8 +12,7 @@ static_assert(crypto_sign_BYTES == 64, "unexpected Ed25519 signature size");
 static_assert(crypto_hash_sha256_BYTES == 32, "unexpected SHA-256 digest size");
 
 bool crypto_ready() noexcept {
-  // sodium_init() is thread-safe and idempotent; the function-local static runs it exactly once.
-  // It returns 0 on success, 1 when already initialised and -1 on failure.
+  // sodium_init() returns 1 when already initialised, so >= 0 means ready.
   static const bool ready = sodium_init() >= 0;
   return ready;
 }

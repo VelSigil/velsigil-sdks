@@ -6,7 +6,7 @@ export function isErrno(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
 }
 
-/** Windows may briefly lock the target (antivirus, indexer); retry transient rename failures. */
+/** Retries renames that fail while antivirus or the indexer briefly locks the file on Windows. */
 export async function renameWithRetry(from: string, to: string): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -20,7 +20,7 @@ export async function renameWithRetry(from: string, to: string): Promise<void> {
   }
 }
 
-/** Persists a rename on POSIX file systems; not supported (and not needed) on Windows. Best effort. */
+/** Best-effort fsync of a directory so a rename survives a crash; skipped on Windows. */
 export async function syncDirectory(directory: string): Promise<void> {
   if (process.platform === 'win32') return;
   try {

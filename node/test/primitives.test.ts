@@ -87,7 +87,6 @@ describe('hardware id', () => {
     expect(parseIoregOutput('nothing here')).toBeNull();
   });
 
-  // Final sweep F-SDK-3: systemd's placeholder is not a machine id, in any case (the same rule in every SDK).
   it('skips an empty Linux machine-id file and the systemd placeholder "uninitialized"', () => {
     expect(usableLinuxMachineId('  4c4c4544004235108051b4c04f4e4b32\n')).toBe('4c4c4544004235108051b4c04f4e4b32');
     expect(usableLinuxMachineId('uninitialized\n')).toBeNull();
@@ -143,7 +142,7 @@ describe('VelsigilResult helpers', () => {
     expect(result.expiresAt?.getTime()).toBe(expiresAt * 1000);
     expect(result.isLifetime).toBe(false);
     expect(result.secondsRemaining(now)).toBe(3 * 86_400 + 60);
-    expect(result.daysRemaining(now)).toBe(4); // rounded up: a part day counts as a day left
+    expect(result.daysRemaining(now)).toBe(4);
     expect(result.expiresWithin(7, now)).toBe(true);
     expect(result.expiresWithin(2, now)).toBe(false);
     expect(result.isExpired(now)).toBe(false);
@@ -157,7 +156,6 @@ describe('VelsigilResult helpers', () => {
     expect(lifetime.daysRemaining()).toBeNull();
   });
 
-  // Final sweep F-SDK-4: days left = ceil(max(0, expiresAt - now) / 86400), now = the result's own time by default.
   it('daysRemaining rounds up and measures at the signed serverTime (or the offline check time) by default', () => {
     const serverTime = 1_767_225_600;
     const trial = new VelsigilResult({
@@ -167,7 +165,7 @@ describe('VelsigilResult helpers', () => {
       serverTime,
       license: { ...base, expiresAt: serverTime + 14 * 86_400 },
     });
-    expect(trial.daysRemaining()).toBe(14); // not the wall clock, which is long past serverTime
+    expect(trial.daysRemaining()).toBe(14);
     expect(trial.daysRemaining((serverTime + 1) * 1000)).toBe(14);
     expect(trial.daysRemaining((serverTime + 13 * 86_400) * 1000)).toBe(1);
     expect(trial.daysRemaining((serverTime + 14 * 86_400 - 1) * 1000)).toBe(1);

@@ -29,11 +29,9 @@ import type {
   ResponsePayload,
 } from './types.js';
 
-/** Upper bound for the `data` string of an envelope (the HTTP layer caps whole bodies as well). */
 const MAX_DATA_LENGTH = 1024 * 1024;
 
 const REQUEST_TYPES: readonly RequestType[] = ['validate', 'deactivate', 'update_check', 'download', 'trial'];
-/** A license key as the server issues it (and as every SDK sends it): 1-64 printable ASCII characters. */
 const TRIAL_KEY_RE = /^[\x21-\x7e]{1,64}$/;
 const LICENSE_STATUSES: readonly LicenseStatus[] = [
   'pending',
@@ -44,6 +42,7 @@ const LICENSE_STATUSES: readonly LicenseStatus[] = [
   'banned',
 ];
 
+/** Outcome of a response envelope check. */
 export type EnvelopeStatus =
   | 'valid'
   | 'invalid_signature'
@@ -53,46 +52,23 @@ export type EnvelopeStatus =
   | 'hwid_mismatch'
   | 'malformed';
 
+/** Result of {@link verifyEnvelope}. */
 export type EnvelopeVerification =
   | { status: 'valid'; payload: ResponsePayload }
   | { status: Exclude<EnvelopeStatus, 'valid'>; reason: string };
 
+/** What a signed response must match. */
 export interface EnvelopeExpectations {
-  /** The nonce sent with the request; the signed payload must echo it exactly. */
+  /** The nonce sent with the request. */
   nonce: string;
-  /** The product this client is configured for. */
   productId: string;
-  /**
-   * The endpoint the request went to (`validate`, `deactivate`, `update_check`, `download` or `trial`).
-   * Required: the payload `type` must match it, otherwise a genuinely signed answer to another endpoint
-   * (e.g. an `update_check` answer, which is `ok` without any license) would pass as a validation.
-   */
+  /** Required: otherwise a signed answer from another endpoint could pass as a validation. */
   type: RequestType;
-  /**
-   * The hwid sent with a device-bound request (validate, deactivate, download, trial). When given, the
-   * payload's `lease` and `activation.hwidHash` (if present) must belong to this hwid and product.
-   */
+  /** The hwid of a device-bound request; the signed lease and activation must belong to it. */
   hwid?: string;
 }
 
-/**
- * Verifies and decodes a signed response envelope.
- *
- * Order of checks (security relevant):
- * 1. the Ed25519 signature over the exact ASCII bytes of the `data` string, using ONLY the given
- *    public key (`kid` is informational and never used for key selection);
- * 2. only then base64url-decode, UTF-8-decode and JSON-parse `data`, and validate its shape;
- * 3. productId, nonce and type must match what this client sent;
- * 4. with `hwid`: the signed lease and `activation.hwidHash` must be bound to that device. The
- *    signature binds the payload to the request only via nonce/product/type, so a response for
- *    another device (the request's hwid and device secret rewritten in transit, e.g. by a
- *    license-sharing proxy) would otherwise pass.
- *
- * Throws `VelsigilError('invalid_argument')` when `expected.type` is not a request type (a
- * programming error: the type check cannot be skipped), and `VelsigilError('invalid_public_key')` for an
- * invalid key or one of the public test keys of the SDK test vectors, whose private keys are published (this
- * helper has no API URL, so unlike the client constructor it refuses them for local servers too).
- */
+/** Verifies the signature first, then decodes the payload and checks it against `expected`. */
 export function verifyEnvelope(
   publicKey: string | KeyObject,
   envelope: unknown,
@@ -101,11 +77,7 @@ export function verifyEnvelope(
   return verifyEnvelopeWith(publicKey, envelope, expected, true);
 }
 
-/**
- * Internal (not exported from the package): {@link verifyEnvelope} without the published-test-key refusal.
- * For `VelsigilClient`, whose constructor already refused those keys outside loopback hosts, and for the SDK's
- * own vector tests.
- */
+/** Internal: the client constructor has already applied its test-key rule. */
 export function verifyEnvelopeAllowingTestKeys(
   publicKey: string | KeyObject,
   envelope: unknown,
@@ -120,7 +92,7 @@ function verifyEnvelopeWith(
   expected: EnvelopeExpectations,
   refuseTestKeys: boolean,
 ): EnvelopeVerification {
-  // JavaScript callers (or casts) can omit `type`: refuse instead of silently skipping the check.
+  // JavaScript callers can omit `type`; refuse rather than skip the check.
   if (!isObject(expected) || !isOneOf(expected.type, REQUEST_TYPES)) {
     throw new VelsigilError(
       'invalid_argument',
@@ -138,8 +110,7 @@ function verifyEnvelopeWith(
   if (typeof sig !== 'string' || sig.length === 0) {
     return { status: 'invalid_signature', reason: 'Envelope signature is missing' };
   }
-  // A valid `data` string is pure ASCII, for which UTF-8 and ASCII bytes are identical; UTF-8 keeps
-  // the mapping lossless for hostile non-ASCII input (which then fails verification or decoding).
+  // UTF-8, not ASCII, so hostile non-ASCII input is not silently mapped to other bytes.
   if (!verifySignature(key, Buffer.from(data, 'utf8'), sig)) {
     return { status: 'invalid_signature', reason: 'Envelope signature verification failed' };
   }
@@ -165,11 +136,7 @@ function verifyEnvelopeWith(
   return { status: 'valid', payload };
 }
 
-/**
- * A verified payload of a device-bound request must describe THIS device: its signed lease (issued
- * for `sha256(hwid)`) and the optional `activation.hwidHash`. Returns the failure, or null.
- * Other lease defects (expired, ...) are not a binding failure; such a lease is just never stored.
- */
+/** The signature alone does not bind a response to this device, so a sharing proxy could swap it. */
 function checkDeviceBinding(
   key: KeyObject,
   payload: ResponsePayload,
@@ -181,7 +148,6 @@ function checkDeviceBinding(
     return { status: 'hwid_mismatch', reason: 'Response activation belongs to a different device' };
   }
   if (payload.lease !== null) {
-    // `key` was already checked by the caller (and refused there if the public helper got a test key).
     const lease = verifyLeaseAllowingTestKeys(key, payload.lease.token, { productId, hwid, now: payload.serverTime });
     if (lease.status === 'hwid_mismatch') {
       return { status: 'hwid_mismatch', reason: 'Response lease was issued for a different device' };
@@ -193,14 +159,13 @@ function checkDeviceBinding(
   return null;
 }
 
-/** Validates the decoded payload shape and copies known fields into fresh objects. */
+/** Validates the payload shape and copies known fields into fresh objects. */
 export function parseResponsePayload(value: unknown): ResponsePayload | null {
   if (!isObject(value)) return null;
   if (value.v !== 1) return null;
   if (!isOneOf(value.type, REQUEST_TYPES)) return null;
   if (typeof value.ok !== 'boolean') return null;
   if (!isCode(value.code)) return null;
-  // Seller-authored text (pause messages, changelogs) is only bounded by the response size cap.
   if (!isString(value.message, MAX_DATA_LENGTH)) return null;
   if (!isNonEmptyString(value.nonce, 256)) return null;
   if (!isString(value.requestId, 128)) return null;
@@ -221,8 +186,7 @@ export function parseResponsePayload(value: unknown): ResponsePayload | null {
   ) {
     return null;
   }
-  // A started trial (SPEC 10.1): an `ok` answer of type `trial` must carry a well-formed key. The field is read on no
-  // other answer (ignored like any unknown field), so no other answer can hand the app a key.
+  // Only an `ok` trial answer may carry a key.
   const startedTrial = value.type === 'trial' && value.ok;
   const trial = startedTrial ? parseNullable(value.trial, parseTrial) : null;
   if (startedTrial && (trial === null || trial === undefined)) return null;
@@ -251,7 +215,7 @@ function parseTrial(o: JsonObject): ProtocolTrial | null {
   return { key: o.key };
 }
 
-/** `null`/absent -> null, valid object -> parsed, anything else -> undefined (invalid). */
+/** Absent gives null, a valid object the parsed value, anything else undefined. */
 function parseNullable<T>(value: unknown, parse: (obj: JsonObject) => T | null): T | null | undefined {
   if (value === null || value === undefined) return null;
   if (!isObject(value)) return undefined;
@@ -267,10 +231,8 @@ function parseLicense(o: JsonObject): ProtocolLicense | null {
   if (!(o.expiresAt === null || isUnixTime(o.expiresAt))) return null;
   if (!isCount(o.maxDevices) || !isCount(o.devicesUsed)) return null;
   if (!isUnixTime(o.createdAt)) return null;
-  // Optional free-trial flag (SPEC 9.7): absent/null = not a trial; any other non-boolean is malformed.
   const trial = o.trial;
   if (!(trial === null || trial === undefined || typeof trial === 'boolean')) return null;
-  // Optional trial conversion reference (SPEC 9.7): absent/null = none; anything but a well-formed string is malformed.
   const trialRef = o.trialRef;
   if (!(trialRef === null || trialRef === undefined || isTrialRef(trialRef))) return null;
   return {
@@ -300,7 +262,6 @@ function parseActivation(o: JsonObject): ProtocolActivation | null {
     status: o.status,
     firstSeenAt: o.firstSeenAt,
     deviceSecret: secret ?? null,
-    // Optional device binding (see checkDeviceBinding); omitted when the server does not send it.
     ...(typeof hwidHash === 'string' ? { hwidHash: hwidHash.toLowerCase() } : {}),
   };
 }
@@ -342,7 +303,6 @@ function parseDownload(o: JsonObject): ProtocolDownload | null {
   };
 }
 
-/** Device secrets are opaque printable ASCII tokens. */
 export function isDeviceSecret(value: unknown): value is string {
   return typeof value === 'string' && /^[\x21-\x7e]{16,256}$/.test(value);
 }

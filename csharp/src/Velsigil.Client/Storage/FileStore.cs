@@ -10,34 +10,19 @@ using System.Security.Principal;
 
 namespace Velsigil.Client.Storage;
 
-/// <summary>
-/// File-backed <see cref="IVelsigilStore"/>: one small JSON file per product
-/// (<c>&lt;directory&gt;/&lt;productId&gt;.json</c>) holding the device secret and the latest lease token.
-/// </summary>
+/// <summary>File-backed store: one JSON file per product holding the device secret and lease token.</summary>
 /// <remarks>
-/// <list type="bullet">
-/// <item>Writes are atomic: data goes to a uniquely named temporary file in the same directory, is flushed
-/// to disk, then renamed over the target, so a crash never leaves a torn file.</item>
-/// <item>Permissions (net8.0 build): on Windows the directory (when created by the store) and every file
-/// get a protected ACL granting access to the current user only; on Linux/macOS the directory is created
-/// with mode 0700 and files with 0600. The netstandard2.0 build (.NET Framework, Unity) cannot set
-/// permissions and relies on the per-user location of the directory.</item>
-/// <item>Thread-safe within a process. Across processes, the last writer wins; files are never torn.</item>
-/// <item>A corrupt or oversized file is treated as empty and replaced on the next write.</item>
-/// <item>With a legacy directory (the default store has one), a product whose file does not exist yet is
-/// read from the legacy directory instead; the next write goes to <see cref="DirectoryPath"/>.</item>
-/// </list>
+/// Writes are atomic and owner-only (the netstandard2.0 build cannot set permissions and relies on the
+/// per-user directory). A corrupt file reads as empty; across processes the last writer wins.
 /// </remarks>
 public sealed class FileStore : IVelsigilStore
 {
     private const int MaxFileBytes = 64 * 1024;
 
-    // Default folder name used by SDK versions released under the former product name (Veltrix). Read-only
-    // fallback so an installed app keeps its device secret and offline lease after updating the SDK.
+    // Default folder of the SDK under its former name; read-only fallback.
     private const string LegacyDefaultFolderName = "Veltrix";
 
-    // Process-wide so that several FileStore instances over the same directory cannot interleave a
-    // read-modify-write cycle.
+    // Process-wide, so several instances over one directory cannot interleave read-modify-write.
     private static readonly object FileLock = new object();
 
     /// <summary>Creates a store rooted at <paramref name="directory"/> (created lazily on first write).</summary>
@@ -48,12 +33,8 @@ public sealed class FileStore : IVelsigilStore
     }
 
     /// <summary>
-    /// Creates a store rooted at <paramref name="directory"/> that migrates state from
-    /// <paramref name="legacyDirectory"/>: when a product has no file in <paramref name="directory"/> yet, its
-    /// file in <paramref name="legacyDirectory"/> is read instead, and the next write goes to
-    /// <paramref name="directory"/>. Use it when you move the store so the device keeps its device secret and
-    /// offline lease. The legacy file is never written; it is deleted only when the product's state is cleared
-    /// (for example after a deactivation), so the cleared state cannot reappear.
+    /// Creates a store that falls back to <paramref name="legacyDirectory"/> for products without a file yet.
+    /// The legacy file is never written; clearing a product's state deletes it.
     /// </summary>
     /// <exception cref="ArgumentException">The directory is null or empty.</exception>
     public FileStore(string directory, string? legacyDirectory)
@@ -73,28 +54,15 @@ public sealed class FileStore : IVelsigilStore
     /// <summary>Absolute path of the directory holding the state files.</summary>
     public string DirectoryPath { get; }
 
-    /// <summary>
-    /// Absolute path of the read-only legacy directory consulted for products without a file in
-    /// <see cref="DirectoryPath"/>, or null. <see cref="CreateDefault"/> sets it to the default directory of
-    /// earlier SDK versions.
-    /// </summary>
+    /// <summary>Read-only legacy directory for products without a file in <see cref="DirectoryPath"/>, or null.</summary>
     public string? LegacyDirectoryPath { get; }
 
-    /// <summary>
-    /// The default per-user directory: <c>%LOCALAPPDATA%\Velsigil</c> on Windows, <c>~/.local/share/Velsigil</c>
-    /// on Linux (XDG data home), the per-user application-support folder on macOS; optionally with an
-    /// <paramref name="applicationName"/> sub-folder.
-    /// </summary>
+    /// <summary>The default per-user directory (for example <c>%LOCALAPPDATA%\Velsigil</c>), optionally with an app sub-folder.</summary>
     /// <exception cref="InvalidOperationException">The OS reports no per-user data directory.</exception>
     /// <exception cref="ArgumentException"><paramref name="applicationName"/> is not a simple folder name.</exception>
     public static string GetDefaultDirectory(string? applicationName = null) => DefaultDirectory("Velsigil", applicationName);
 
-    /// <summary>
-    /// Creates a store in <see cref="GetDefaultDirectory"/>. State written by earlier SDK versions in their
-    /// default directory (<c>%LOCALAPPDATA%\Veltrix</c>, <c>~/.local/share/Veltrix</c>, ... with the same
-    /// <paramref name="applicationName"/>) is still read until the product's first write (see
-    /// <see cref="LegacyDirectoryPath"/>).
-    /// </summary>
+    /// <summary>Creates a store in <see cref="GetDefaultDirectory"/> that still reads state written by earlier SDK versions.</summary>
     /// <exception cref="InvalidOperationException">The OS reports no per-user data directory.</exception>
     /// <exception cref="ArgumentException"><paramref name="applicationName"/> is not a simple folder name.</exception>
     public static FileStore CreateDefault(string? applicationName = null) =>
@@ -177,8 +145,7 @@ public sealed class FileStore : IVelsigilStore
         var state = ReadFile(GetFilePath(productId));
         if (state != null) return state;
 
-        // Migration: no file here yet, so use what an earlier SDK version stored in the legacy directory.
-        // The next write goes to DirectoryPath; from then on the legacy file is no longer read.
+        // Fall back to the legacy directory until the first write here.
         var legacyPath = GetLegacyFilePath(productId);
         return (legacyPath is null ? null : ReadFile(legacyPath)) ?? new State();
     }

@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Velsigil mock client API for SDK integration tests.
+"""Velsigil mock client API for SDK integration tests; never expose it to a network.
 
-Implements POST /api/client/v1/{validate,deactivate,update-check,download} with Ed25519-signed
-envelopes (SPEC section 10) using keys.privateSeedBase64 from sdks/test-vectors.json, plus
-GET /files/<name> for release downloads. The scenario is selected by the license key:
+The license key selects the scenario:
 
   VX-OK       normal license: issues a device secret on first activation and afterwards requires it
               (strict device binding), returns an offline lease, supports deactivate and download
@@ -20,8 +18,6 @@ GET /files/<name> for release downloads. The scenario is selected by the license
   VX-504      504 with an empty body (a gateway timeout)
   VX-SLOW     answers after 3 seconds (client timeouts)
   VX-DLBAD    download descriptor whose sha256 does not match the served file
-
-Test-only code: it keeps state in memory and must never be exposed to a network.
 """
 
 from __future__ import annotations
@@ -61,7 +57,6 @@ class MockState:
         self.device_secrets: Dict[Tuple[str, str], str] = {}  # (license key, hwid) -> issued device secret
         self.seen_nonces: set = set()
 
-    # -- signing --------------------------------------------------------------------------------
     def envelope(self, payload: Dict[str, Any], tamper: bool = False) -> bytes:
         data = b64url(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
         signature = bytearray(self.key.sign(data.encode("ascii")))
@@ -133,7 +128,6 @@ class Handler(BaseHTTPRequestHandler):
         # Request bodies (license keys, device secrets) are never logged.
         return
 
-    # -- helpers --------------------------------------------------------------------------------
     def send_body(self, status: int, body: bytes, content_type: Optional[str] = "application/json",
                   extra: Optional[Dict[str, str]] = None) -> None:
         try:
@@ -147,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
-            # The client gave up (timeout tests); nothing left to do.
+            # The client gave up (timeout tests).
             self.close_connection = True
 
     def send_error_body(self, status: int, code: str, message: str, extra: Optional[Dict[str, str]] = None) -> None:
@@ -174,7 +168,6 @@ class Handler(BaseHTTPRequestHandler):
             return None, "invalid productId"
         return request, None
 
-    # -- routes ---------------------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
         if self.path == "/files/release.bin":
             self.send_body(200, RELEASE_BYTES, "application/octet-stream")
@@ -313,7 +306,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_update_check(self, request: Dict[str, Any], now: int) -> None:
         if request.get("version") == "0.0.0":
-            # Like the real server (SPEC 10.2): ok is true for an update check with nothing published.
+            # Like the real server: ok is true for an update check with nothing published.
             payload = base_payload("update_check", request, True, "no_release", "No release has been published yet.", now)
         else:
             payload = base_payload("update_check", request, True, "ok", "Update information.", now)

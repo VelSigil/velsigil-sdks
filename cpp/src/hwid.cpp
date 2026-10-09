@@ -1,6 +1,4 @@
-// Machine id discovery for the hardware id (SPEC 10.6). The resulting hwid is a stable,
-// non-reversible identifier; it is spoofable and therefore never treated as a security boundary
-// (the server-issued device secret and server-side checks are).
+// Machine id discovery. The hwid is spoofable, so it is never a security boundary.
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -78,7 +76,7 @@ std::optional<std::string> read_reg_sz(HKEY key, const wchar_t* subkey, DWORD ex
 }
 
 std::optional<std::string> read_windows_machine_guid() {
-  // Always read the 64-bit registry view so 32-bit and 64-bit builds derive the same hwid.
+  // Read the 64-bit registry view so 32-bit and 64-bit builds get the same hwid.
   if (auto value = read_reg_sz(HKEY_LOCAL_MACHINE, kCryptographyKey, RRF_SUBKEY_WOW6464KEY)) return value;
 
   // Fallback for systems whose RegGetValueW does not understand RRF_SUBKEY_WOW6464KEY.
@@ -146,8 +144,7 @@ std::string normalize_machine_id(std::string_view raw) {
 }
 
 std::optional<std::string> usable_machine_id(std::string content) {
-  // systemd writes "uninitialized" before the first boot commits an id, and images systemd never booted keep it,
-  // so every copy would share one hwid: it is not a machine id.
+  // systemd's "uninitialized" placeholder would give every unbooted image the same hwid.
   const std::string normalized = normalize_machine_id(content);
   if (normalized.empty() || normalized == "uninitialized") return std::nullopt;
   return content;

@@ -1,17 +1,5 @@
-// Velsigil C++ SDK example: validate a license (with offline fallback), gate a feature, check for
-// updates and download + verify a release.
-//
-// Replace the placeholders kApiUrl, kProductId and kPublicKey below with your product's values, build with
-// -DVX_BUILD_EXAMPLES=ON, then run `velsigil_example_basic`. While a placeholder is still in place it prints a
-// short usage message and exits with code 2. The license key is read from standard input and never printed or
-// logged.
-//
-// Local testing only: the three values can be given on the command line instead, and ONLY when the API URL given
-// there is a loopback URL (http(s)://localhost, 127.0.0.1 or [::1], such as the bundled mock server; see
-// tests/mock_server/README.md):
-//   velsigil_example_basic http://127.0.0.1:8787 [<product id> <public key>]
-// An override with any other URL is refused (exit code 2): a shipped application takes its server, product id and
-// public key from its own binary, never from outside it.
+// Example: validate a license, gate a feature, check for updates and download a release.
+// Set kApiUrl, kProductId and kPublicKey below; the usage text explains local testing.
 #include <velsigil/client.hpp>
 
 #include <cctype>
@@ -23,10 +11,8 @@
 
 namespace {
 
-// Replace these placeholders with the values from your product's "Integration" tab in the Velsigil panel
-// (Products > your product > Integration). Keep them compiled into the binary, above all the public key: it is
-// the trust anchor that makes forged server responses detectable (never load it from a file, environment
-// variable or the network).
+// Your product's values from the panel (Products > your product > Integration).
+// Keep the public key compiled in; never load it from a file, env var or the network.
 constexpr char kApiUrl[] = "<your Velsigil server URL, e.g. https://licenses.example.com>";
 constexpr char kProductId[] = "<your product id>";
 constexpr char kPublicKey[] = "<your product's public key>";
@@ -39,13 +25,10 @@ constexpr char kUsage[] =
     "panel (Products > your product > Integration), then rebuild. Values on the command line are accepted only\n"
     "with an API URL on localhost, 127.0.0.1 or [::1].\n";
 
-// The hosts of a server on this machine (the SDK accepts plain http:// only for them).
 constexpr std::string_view kLoopbackHosts[] = {"localhost", "127.0.0.1", "[::1]"};
 
-// A value that still holds its "<...>" placeholder.
 bool is_placeholder(std::string_view value) { return value.empty() || value.front() == '<'; }
 
-// True for an http(s) URL whose host is localhost, 127.0.0.1 or [::1] (any port and path).
 bool is_loopback_url(std::string_view url) {
   std::string lower(url);
   for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -58,7 +41,7 @@ bool is_loopback_url(std::string_view url) {
     return false;
   }
   const std::string_view authority = rest.substr(0, rest.find_first_of("/?#"));
-  // User info names no host: in "http://localhost:80@evil.example" the host is evil.example.
+  // Reject user info: "http://localhost:80@evil.example" points at evil.example.
   if (authority.find('@') != std::string_view::npos) return false;
   for (const std::string_view host : kLoopbackHosts) {
     if (authority == host || (authority.size() > host.size() && authority.substr(0, host.size()) == host &&
@@ -69,7 +52,7 @@ bool is_loopback_url(std::string_view url) {
   return false;
 }
 
-// Defense in depth: never let a server-provided name choose a directory.
+// Never let a server-provided name choose a directory.
 std::string safe_file_name(const std::string& name) {
   std::string out;
   for (const char c : name) {
@@ -84,7 +67,6 @@ void print_result(const velsigil::ValidationResult& result) {
   std::cout << "ok=" << (result.ok ? "true" : "false") << " code=" << result.code << (result.offline ? " (offline)" : "") << '\n'
             << "message: " << result.message << '\n';
   if (result.request_id) std::cout << "request id: " << *result.request_id << '\n';
-  // The server's Retry-After (HTTP 429 or 503; also on an offline fallback result): when to try online again.
   if (result.retry_after) std::cout << "retry after: " << *result.retry_after << " s\n";
   if (result.license) {
     std::cout << "plan: " << result.license->plan << ", status: " << result.license->status << '\n';
@@ -103,8 +85,6 @@ int main(int argc, char** argv) {
   std::string product_id = kProductId;
   std::string public_key = kPublicKey;
   if (argc == 2 || argc == 4) {
-    // Local testing only: values from the command line are accepted ONLY with a loopback API URL (a server on
-    // this machine, such as the bundled mock server), never for a remote server.
     if (!is_loopback_url(argv[1])) {
       std::cerr << "Values on the command line are for local testing only: the API URL must be on localhost, "
                    "127.0.0.1 or [::1].\n"
@@ -125,7 +105,7 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  // Persist the device secret and offline lease between runs (owner-only file, atomic writes).
+  // Persists the device secret and offline lease between runs.
   velsigil::ClientOptions options;
   std::filesystem::path store_path = velsigil::FileStore::default_path("Velsigil Example");
   if (store_path.empty()) store_path = "velsigil-license.json";
@@ -149,8 +129,7 @@ int main(int argc, char** argv) {
   const velsigil::ValidationResult result = client.validate_with_offline_fallback(license_key, validate_options);
   print_result(result);
   if (!result.ok) {
-    // Business failures (expired, revoked, device limit, ...) and transport problems all end up
-    // here; never treat anything but ok == true as licensed.
+    // Anything but ok == true means not licensed.
     return 1;
   }
 

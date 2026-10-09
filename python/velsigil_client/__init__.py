@@ -1,19 +1,4 @@
-"""Official Python client for the Velsigil license server.
-
-Quick start::
-
-    from velsigil_client import VelsigilClient, FileStore, default_store_path
-
-    client = VelsigilClient(
-        "https://licenses.example.com",
-        "0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b",
-        "<your product's public key>",  # panel: Products > your product > Integration
-        store=FileStore(default_store_path("MyApp")),
-    )
-    result = client.validate_with_offline_fallback(license_key, version="1.4.0")
-    if not result.ok:
-        print("License problem:", result.code, result.message)
-"""
+"""Python client for the Velsigil license server."""
 
 import logging as _logging
 
@@ -45,8 +30,7 @@ from .store import FileStore, LicenseStore, MemoryStore, StoredState, default_st
 
 __version__ = SDK_VERSION
 
-# Library etiquette: stay silent unless the application configures logging.
-# Log records never contain license keys, device secrets or lease tokens.
+# Stay silent unless the application configures logging.
 _logging.getLogger("velsigil_client").addHandler(_logging.NullHandler())
 
 __all__ = [

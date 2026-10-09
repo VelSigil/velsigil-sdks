@@ -1,17 +1,4 @@
-/**
- * velsigil-client - official Node.js SDK for the Velsigil license server.
- *
- * @example
- * ```ts
- * import { VelsigilClient, FileStore, defaultStoreDirectory } from 'velsigil-client';
- *
- * const client = new VelsigilClient(API_URL, PRODUCT_ID, PUBLIC_KEY, {
- *   store: new FileStore(defaultStoreDirectory('MyApp')),
- * });
- * const result = await client.validateWithOfflineFallback(licenseKey, { version: '1.2.0' });
- * if (!result.ok) exitWith(result.code);
- * ```
- */
+/** Node.js SDK for the Velsigil license server. */
 export { VelsigilClient, type StartTrialOptions, type ValidateOptions, type VelsigilClientOptions } from './client.js';
 export {
   VelsigilResult,

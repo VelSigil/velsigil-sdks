@@ -1,6 +1,4 @@
-// Real libcurl round trips against tests/mock_server/mock_server.py (started by run_http_tests.py).
-// Arguments: <mock base URL> <URL with nothing listening> <product public key>. Uses only the
-// public API. Exit code 0 = all checks passed.
+// Real libcurl round trips against the mock server (started by run_http_tests.py).
 #include <velsigil/client.hpp>
 
 #include <chrono>
@@ -55,7 +53,6 @@ velsigil::Client make_client(const Setup& setup, const std::string& url, const s
 void run(const Setup& setup) {
   namespace fs = std::filesystem;
 
-  // ok + device secret persistence + strict device binding on the mock.
   auto store = std::make_shared<velsigil::MemoryStore>();
   velsigil::Client client = make_client(setup, setup.base_url, "http-test-hwid-0001", store);
   check(client.is_configured(), "client configured: " + client.configuration_error());
@@ -70,8 +67,7 @@ void run(const Setup& setup) {
   velsigil::Client stranger = make_client(setup, setup.base_url, "http-test-hwid-0001", std::make_shared<velsigil::MemoryStore>());
   check_code(stranger.validate("VX-OK"), "device_verification_failed", "same hwid without the device secret");
 
-  // Failure scenarios use their own store: a signed invalid_key would (by design) drop the lease
-  // that the offline-fallback check below relies on.
+  // Own store: a signed invalid_key would drop the lease the offline check below needs.
   velsigil::Client failing = make_client(setup, setup.base_url, "http-test-hwid-fail", std::make_shared<velsigil::MemoryStore>());
   check_code(failing.validate("VX-INVALID"), "invalid_key", "signed business failure");
   check_code(failing.validate("VX-NONCE"), "invalid_response", "nonce mismatch");
@@ -94,16 +90,12 @@ void run(const Setup& setup) {
   velsigil::Client nobody = make_client(setup, setup.refused_url, "http-test-hwid-0001", std::make_shared<velsigil::MemoryStore>());
   check_code(nobody.validate("VX-OK"), "network_error", "connection refused");
 
-  // Offline fallback: same store (lease) and hwid, server unreachable.
   velsigil::Client offline = make_client(setup, setup.refused_url, "http-test-hwid-0001", store);
   const auto fallback = offline.validate_with_offline_fallback("VX-OK");
   check(fallback.ok && fallback.offline && fallback.has_feature("pro"), "offline fallback with the stored lease");
 
-  // The server answers but is unavailable (its database is down) or a gateway cannot reach it: every unsigned
-  // 5xx, whatever its body (Velsigil error, HTML, empty), falls back too. validate() reports the real error, and
-  // without a lease the fallback returns that error. 4xx answers never fall back.
   velsigil::Client degraded = make_client(setup, setup.base_url, "http-test-hwid-0001", store);
-  // `retry_after`: the mock's Retry-After (sent with VX-503 and VX-503J only), read by the libcurl transport.
+  // Only VX-503 and VX-503J send a Retry-After.
   struct Outage {
     const char* key;
     const char* code;
@@ -132,12 +124,10 @@ void run(const Setup& setup) {
   check_code(bad_request, "validation_error", "HTTP 400 with a stored lease");
   check(store->get(kProduct, velsigil::store_keys::kLease).has_value(), "outages keep the stored lease");
 
-  // Updates.
   const auto update = client.check_update("1.0.0");
   check(update.ok && update.update && update.update->update_available && update.update->latest_version == "1.4.0", "update available");
   check_code(client.check_update("0.0.0"), "no_release", "no release");
 
-  // Download flow: signed descriptor -> streamed file -> size + SHA-256 verified.
   std::error_code ec;
   const fs::path destination = fs::temp_directory_path() / "velsigil-http-test-release.bin";
   fs::remove(destination, ec);
@@ -169,7 +159,6 @@ void run(const Setup& setup) {
     check(!fs::exists(destination, ec), "rejected download leaves no file");
   }
 
-  // Deactivation releases the device and clears local state.
   const auto deactivated = client.deactivate("VX-OK");
   check(deactivated.ok, "deactivate ok");
   check(!store->get(kProduct, velsigil::store_keys::kDeviceSecret) && !store->get(kProduct, velsigil::store_keys::kLease),

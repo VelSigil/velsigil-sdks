@@ -9,11 +9,7 @@ using Xunit;
 
 namespace Velsigil.Client.Tests;
 
-/// <summary>
-/// The private keys of the two test-vector key pairs are published (sdks/test-vectors.json), so the client refuses their
-/// public keys unless the API URL is loopback (the hosts plain http is allowed for), and the public LeaseVerifier.Verify
-/// helper (no URL) refuses them always. The SDK's own vector tests use the internal overload that takes a decoded key.
-/// </summary>
+/// <summary>Test-vector keys are refused outside loopback; the public LeaseVerifier.Verify refuses them always.</summary>
 public class PublishedTestKeyTests
 {
     // Same text in every Velsigil SDK.
@@ -44,7 +40,7 @@ public class PublishedTestKeyTests
             "https://127.0.0.1.nip.io",
             "https://10.0.0.5:3000",
             "https://[::2]",
-            "https://[::ffff:127.0.0.1]", // IPv4-mapped loopback is not in the loopback set (localhost, 127.0.0.1, ::1)
+            "https://[::ffff:127.0.0.1]", // IPv4-mapped loopback is not in the loopback set
             "https://[::]",
             "https://localhost.", // trailing dot: another host name
         };
@@ -146,7 +142,7 @@ public class PublishedTestKeyTests
     {
         foreach (var testKey in new[] { Vectors.PublicKey, Vectors.WrongPublicKey })
         {
-            // Flip bits until the result is a valid Ed25519 public key (not every 32-byte string is a curve point).
+            // Flip bits until the result is a valid Ed25519 point.
             var raw = Convert.FromBase64String(testKey);
             Ed25519Verifier? neighbour = null;
             for (var bit = 0; bit < 8 * raw.Length && neighbour is null; bit++)
@@ -178,8 +174,7 @@ public class PublishedTestKeyTests
         Assert.False(PublishedTestKeys.Contains(Convert.FromBase64String(Vectors.PublicKey).Take(31).ToArray()));
     }
 
-    // ---- The public low-level helper LeaseVerifier.Verify(token, publicKeyBase64, ...) has no API URL, so there is no
-    // loopback exception: it refuses the test keys for every caller.
+    // LeaseVerifier.Verify has no API URL, so it refuses the test keys for every caller.
 
     [Theory]
     [MemberData(nameof(TestKeyEncodings))]
@@ -255,7 +250,7 @@ public class PublishedTestKeyTests
     [Fact]
     public void The_unguarded_path_is_not_public()
     {
-        // No public opt-out: the only public Verify takes the key as base64 (guarded), and the decoded-key type is internal.
+        // No public opt-out: the decoded-key overload is internal.
         var publicVerify = typeof(LeaseVerifier).GetMethods(BindingFlags.Public | BindingFlags.Static).Where(m => m.Name == "Verify").ToArray();
         Assert.Single(publicVerify);
         Assert.Equal(typeof(string), publicVerify[0].GetParameters()[1].ParameterType);
@@ -266,8 +261,7 @@ public class PublishedTestKeyTests
     private static VelsigilClientOptions Options() =>
         new VelsigilClientOptions { Store = new MemoryStore(), HardwareId = Vectors.TestHwid };
 
-    // Standard base64 of 32 bytes ends in one character carrying 4 data bits and 2 unused bits ("X=" with the unused
-    // bits zero). Setting the lowest unused bit gives another string that decodes to the same 32 bytes.
+    // The last base64 char carries 2 unused bits; setting one gives another spelling of the same 32 bytes.
     private static string WithNonZeroTrailingBits(string key)
     {
         const string Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

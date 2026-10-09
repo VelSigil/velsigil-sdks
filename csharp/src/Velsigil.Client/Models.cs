@@ -26,11 +26,7 @@ public static class LicenseStatuses
 }
 
 /// <summary>License details from a signed server response.</summary>
-/// <remarks>
-/// On a failed result (a denial such as <c>license_revoked</c>) <see cref="Features"/> is informational only:
-/// gate paid features with <see cref="VelsigilResult.HasFeature"/>, which is false unless the result is ok.
-/// <see cref="HasFeature"/> here is gated the same way.
-/// </remarks>
+/// <remarks>On a failed result <see cref="Features"/> is informational; gate features with <see cref="VelsigilResult.HasFeature"/>.</remarks>
 public sealed class LicenseInfo
 {
     private readonly bool _granted;
@@ -61,16 +57,10 @@ public sealed class LicenseInfo
         TrialRef = trialRef;
     }
 
-    /// <summary>
-    /// True for a free-trial license (SPEC 9.7): the optional signed <c>trial</c> field. Absent (paid licenses,
-    /// older servers) means false. A purchase with the same e-mail keeps the key and turns this false.
-    /// </summary>
+    /// <summary>True for a free-trial license; a purchase with the same e-mail turns it false.</summary>
     public bool IsTrial { get; }
 
-    /// <summary>
-    /// The trial's conversion reference (SPEC 9.7, servers since 2026-10-06): set for a free trial a purchase can still
-    /// convert, null otherwise (paid licenses, older servers). Opaque; see <see cref="VelsigilResult.TrialRef"/>.
-    /// </summary>
+    /// <summary>Opaque reference a purchase uses to convert this trial; see <see cref="VelsigilResult.TrialRef"/>.</summary>
     public string? TrialRef { get; }
 
     /// <summary>License id (UUID).</summary>
@@ -106,12 +96,7 @@ public sealed class LicenseInfo
     /// <summary>Creation time as a UTC timestamp.</summary>
     public DateTimeOffset CreatedAt => DateTimeOffset.FromUnixTimeSeconds(CreatedAtUnix);
 
-    /// <summary>
-    /// True only when this license came from an ok response, its <see cref="Status"/> is <c>active</c> or
-    /// <c>pending</c>, and <paramref name="name"/> is in <see cref="Features"/> (ordinal comparison). A denial
-    /// (revoked, banned, suspended, expired, ...) never unlocks a feature, even when an older server still listed
-    /// the plan's features on it.
-    /// </summary>
+    /// <summary>True only for an ok, active or pending license that lists <paramref name="name"/>.</summary>
     public bool HasFeature(string name) =>
         _granted
         && (string.Equals(Status, LicenseStatuses.Active, StringComparison.Ordinal) || string.Equals(Status, LicenseStatuses.Pending, StringComparison.Ordinal))
@@ -141,10 +126,7 @@ public sealed class ActivationInfo
     /// <summary>First time the server saw this device.</summary>
     public DateTimeOffset FirstSeenAt => DateTimeOffset.FromUnixTimeSeconds(FirstSeenAtUnix);
 
-    /// <summary>
-    /// True when this response issued a new device secret. The SDK has already persisted it in the
-    /// configured store; the secret itself is deliberately never exposed on results.
-    /// </summary>
+    /// <summary>True when this response issued a new device secret (already stored, never exposed).</summary>
     public bool DeviceSecretIssued { get; }
 }
 
@@ -168,10 +150,7 @@ public sealed class LeaseInfo
 }
 
 /// <summary>Verified claims of an offline lease (see <see cref="LeaseVerifier"/>).</summary>
-/// <remarks>
-/// Claims are also returned for an expired lease and the mismatch outcomes (diagnostics). Their
-/// <see cref="Features"/> are then informational only and <see cref="HasFeature"/> is false.
-/// </remarks>
+/// <remarks>Claims of an expired or mismatched lease are diagnostics; <see cref="HasFeature"/> is then false.</remarks>
 public sealed class LeaseClaims
 {
     private readonly bool _valid;
@@ -220,7 +199,7 @@ public sealed class LeaseClaims
     /// <summary>Feature flags at issue time.</summary>
     public IReadOnlyList<string> Features { get; }
 
-    /// <summary>True when the lease belongs to a free-trial license (the optional signed <c>trial</c> claim, SPEC 9.7).</summary>
+    /// <summary>True when the lease belongs to a free-trial license.</summary>
     public bool IsTrial { get; }
 
     /// <summary>License expiry at issue time (unix seconds), or null for a lifetime license.</summary>
@@ -241,10 +220,7 @@ public sealed class LeaseClaims
     /// <summary>Lease expiry.</summary>
     public DateTimeOffset ExpiresAt => DateTimeOffset.FromUnixTimeSeconds(ExpiresAtUnix);
 
-    /// <summary>
-    /// True only when the lease verified as <see cref="LeaseStatus.Valid"/> and <paramref name="name"/> is in
-    /// <see cref="Features"/> (ordinal comparison); always false for an expired or mismatched lease.
-    /// </summary>
+    /// <summary>True only for a valid lease that lists <paramref name="name"/> (ordinal comparison).</summary>
     public bool HasFeature(string name) => _valid && FeatureList.Contains(Features, name);
 }
 

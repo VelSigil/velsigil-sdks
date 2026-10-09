@@ -1,9 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { HWID_PREFIX, VelsigilError, hwidFromMachineId, type EnvelopeExpectations } from '../src/index.js';
-// The vectors are signed with the published test keys, which the public verifyEnvelope / verifyLease refuse
-// (see "published test keys" in client.test.ts): the vectors run through the SDK's internal paths, which differ
-// from the public helpers only in that refusal.
+// The public helpers refuse the published test keys, so the vectors use the internal paths.
 import { verifyEnvelopeAllowingTestKeys } from '../src/envelope.js';
 import { verifyLeaseAllowingTestKeys } from '../src/lease.js';
 import { normalizeMachineId } from '../src/hwid.js';
@@ -48,7 +46,6 @@ describe('test-vectors.json: envelopes', () => {
       });
       expect(verification.status).toBe(vector.expect);
       if (verification.status === 'valid') {
-        // The parser normalizes the optional `download` field to null and drops fields it does not know.
         expect(verification.payload).toEqual({ download: null, ...knownPayload(vector.payload!, vector.unknownFields) });
       }
     });
@@ -68,12 +65,9 @@ describe('test-vectors.json: envelopes', () => {
     expect(trial.status === 'valid' && trial.payload.license?.trial).toBe(true);
     const used = verify('trial_already_used');
     expect(used.status === 'valid' && used.payload.ok === false && used.payload.code === 'trial_already_used').toBe(true);
-    // Paid licenses carry no trial field at all (and the existing vectors stay byte-identical).
     const paid = verify('validate_ok');
     expect(paid.status === 'valid' && 'trial' in (paid.payload.license ?? {})).toBe(false);
-    // Unknown fields are ignored, never an error.
     expect(verify('unknown_fields').status).toBe('valid');
-    // The trial conversion reference (SPEC 9.7): kept on a valid trial answer, also on license_expired.
     for (const name of ['validate_ok_trial_ref', 'license_expired_trial_ref']) {
       const withRef = verify(name);
       expect(withRef.status, name).toBe('valid');
@@ -118,7 +112,6 @@ describe('test-vectors.json: envelopes', () => {
       const unbound = verifyEnvelopeAllowingTestKeys(vectors.keys.publicKey, vector.envelope, expectations);
       expect(unbound.status).toBe('valid');
       if (unbound.status === 'valid') expect(unbound.payload).toEqual({ download: null, ...vector.payload });
-      // The same bytes are accepted for the device they were issued to.
       const owner = vector.name === 'validate_lease_other_device' ? 'test-hwid-0001-abcdef' : 'test-hwid-9999-zzzzzz';
       const forOwner = verifyEnvelopeAllowingTestKeys(vectors.keys.publicKey, vector.envelope, { ...expectations, hwid: owner });
       expect(forOwner.status).toBe('valid');
@@ -126,8 +119,6 @@ describe('test-vectors.json: envelopes', () => {
   });
 
   it('type_mismatch is authentic: only the type check rejects it, even for a device-bound request', () => {
-    // SDK-1: a signed update-check answer (ok: true, no license involved) for this request's nonce and
-    // product must not pass as the answer to a validate request.
     const vector = vectors.envelopes.find((v) => v.name === 'type_mismatch')!;
     expect(vector.requestType).toBe('validate');
     expect(vector.payload).toMatchObject({ type: 'update_check', ok: true, license: null, lease: null });
@@ -164,7 +155,7 @@ describe('test-vectors.json: envelopes', () => {
         productId: vector.productId,
         type: vector.requestType,
       });
-      // wrong_key was signed by the "wrong" key pair, so it is the only one that verifies here.
+      // wrong_key is the only vector signed by this key.
       if (vector.name === 'wrong_key') {
         expect(verification.status).not.toBe('invalid_signature');
       } else {

@@ -1,12 +1,9 @@
 namespace Velsigil.Client;
 
-/// <summary>
-/// Every <see cref="VelsigilResult.Code"/> the SDK can return. Codes are stable snake_case strings so new
-/// server codes can surface without an SDK update; compare against these constants.
-/// </summary>
+/// <summary>Every <see cref="VelsigilResult.Code"/> the SDK can return; compare against these constants.</summary>
 public static class ResultCodes
 {
-    // ---- Signed server codes (SPEC section 10.3) -------------------------------------------------
+    // Signed server codes.
 
     /// <summary>The request succeeded.</summary>
     public const string Ok = "ok";
@@ -77,16 +74,10 @@ public static class ResultCodes
     /// <summary>The requested release version does not exist.</summary>
     public const string ReleaseNotFound = "release_not_found";
 
-    /// <summary>
-    /// This device already used a free trial of the product (SPEC 9.7). A signed failure that keeps the stored
-    /// offline lease; offer a purchase.
-    /// </summary>
+    /// <summary>This device already used a free trial of the product; the stored lease is kept.</summary>
     public const string TrialAlreadyUsed = "trial_already_used";
 
-    /// <summary>
-    /// In-app trials (<see cref="VelsigilClient.StartTrialAsync"/>): the seller offers no in-app trial right now
-    /// (switched off, today's limit, too many trials from this network). A signed failure.
-    /// </summary>
+    /// <summary>In-app trials: the seller offers no in-app trial right now.</summary>
     public const string TrialUnavailable = "trial_unavailable";
 
     /// <summary>In-app trials: the offer confirms an e-mail address first and none was sent.</summary>
@@ -98,13 +89,10 @@ public static class ResultCodes
     /// <summary>In-app trials: the e-mail domain is not accepted (throwaway or blocked domain).</summary>
     public const string TrialEmailNotAccepted = "trial_email_not_accepted";
 
-    /// <summary>
-    /// In-app trials: a confirmation link was e-mailed (the same answer for every valid address). Not an error of
-    /// the user: the key arrives by e-mail and is entered like any key.
-    /// </summary>
+    /// <summary>In-app trials: a confirmation link was e-mailed; the key arrives by e-mail.</summary>
     public const string TrialConfirmationSent = "trial_confirmation_sent";
 
-    // ---- Unsigned HTTP errors (never successful) -------------------------------------------------
+    // Unsigned HTTP errors (never successful).
 
     /// <summary>The server rejected the request body (HTTP 400).</summary>
     public const string ValidationError = "validation_error";
@@ -118,12 +106,7 @@ public static class ResultCodes
     /// <summary>Too many requests (HTTP 429); see <see cref="VelsigilResult.RetryAfter"/>.</summary>
     public const string RateLimited = "rate_limited";
 
-    /// <summary>
-    /// The server failed or is temporarily unavailable: an unsigned HTTP 5xx answer (500, or 502/503/504 with a
-    /// Velsigil error body, e.g. while the server's database is down). With an HTTP 5xx status it triggers the
-    /// offline fallback of <see cref="VelsigilClient.ValidateWithOfflineFallbackAsync"/>, like
-    /// <see cref="NetworkError"/>; retry later.
-    /// </summary>
+    /// <summary>Unsigned HTTP 5xx from the server; triggers the offline fallback like <see cref="NetworkError"/>.</summary>
     public const string InternalError = "internal_error";
 
     /// <summary>The request body was too large (HTTP 413).</summary>
@@ -132,28 +115,15 @@ public static class ResultCodes
     /// <summary>The request content type was rejected (HTTP 415).</summary>
     public const string UnsupportedMediaType = "unsupported_media_type";
 
-    // ---- SDK-side codes (SPEC section 14; identical names in every Velsigil SDK) -------------------
+    // SDK-side codes, the same in every Velsigil SDK.
 
-    /// <summary>
-    /// The response was unsigned, carried an invalid signature, a foreign nonce/product/type, a signed
-    /// lease or activation of another device (hardware id), a download URL outside the https policy, or
-    /// was otherwise malformed. Treat as hostile; never as success.
-    /// </summary>
+    /// <summary>The response was unsigned, tampered, mismatched or malformed. Never treat it as success.</summary>
     public const string InvalidResponse = "invalid_response";
 
-    /// <summary>
-    /// The server could not be reached (DNS, connection, TLS, timeout), or a gateway answered 502/503/504
-    /// without a Velsigil error body (an HTML page, an empty body). Triggers the offline fallback of
-    /// <see cref="VelsigilClient.ValidateWithOfflineFallbackAsync"/>, as does every other unsigned HTTP 5xx answer
-    /// (<see cref="InternalError"/>).
-    /// </summary>
+    /// <summary>The server could not be reached, or a gateway answered 502/503/504; triggers the offline fallback.</summary>
     public const string NetworkError = "network_error";
 
-    /// <summary>
-    /// Invalid client configuration. The .NET SDK reports configuration mistakes idiomatically by throwing
-    /// <see cref="System.ArgumentException"/> from the constructor; this constant is the cross-SDK name for
-    /// that condition (apps that map exceptions to codes should use it).
-    /// </summary>
+    /// <summary>Invalid client configuration; the .NET constructor throws <see cref="System.ArgumentException"/> instead.</summary>
     public const string InvalidConfiguration = "invalid_configuration";
 
     /// <summary>Offline validation: no lease is stored for this product.</summary>
@@ -162,42 +132,24 @@ public static class ResultCodes
     /// <summary>Offline validation: the stored lease has expired.</summary>
     public const string LeaseExpired = "lease_expired";
 
-    /// <summary>
-    /// Offline validation: the stored lease is not acceptable (invalid signature, another product or
-    /// device, or not a lease token). <see cref="VelsigilResult.LeaseStatus"/> tells which.
-    /// </summary>
+    /// <summary>Offline validation: the stored lease is not acceptable; see <see cref="VelsigilResult.LeaseStatus"/>.</summary>
     public const string LeaseInvalid = "lease_invalid";
 
     /// <summary>A downloaded file did not match the signed size / SHA-256 (it was discarded).</summary>
     public const string IntegrityMismatch = "integrity_mismatch";
 
-    /// <summary>
-    /// A download could not be completed: non-200 status (an expired link answers 410: request a new one) or
-    /// a download URL rejected by the HTTPS policy.
-    /// </summary>
+    /// <summary>A download failed: non-200 status (410 means the link expired) or a URL the HTTPS policy rejects.</summary>
     public const string DownloadFailed = "download_failed";
 
     /// <summary>A download could not be written to the destination (local file-system error).</summary>
     public const string IoError = "io_error";
 
-    /// <summary>
-    /// <see cref="VelsigilClient.StartTrialAsync"/> reached a Velsigil server without the in-app trial endpoint
-    /// (HTTP 404 with the Velsigil error code <c>not_found</c>): the seller must update the panel.
-    /// </summary>
+    /// <summary><see cref="VelsigilClient.StartTrialAsync"/> reached a server without the in-app trial endpoint.</summary>
     public const string PanelTooOld = "panel_too_old";
 
-    /// <summary>
-    /// <see cref="VelsigilClient.StartTrialAsync"/> refused locally: a device secret or an offline lease is already
-    /// stored for the product, so this device holds a license that a trial must not replace. Nothing was sent and the
-    /// stored state is unchanged; validate the saved key, or call <see cref="VelsigilClient.DeactivateAsync"/> /
-    /// <see cref="VelsigilClient.ClearStoredState"/> first.
-    /// </summary>
+    /// <summary><see cref="VelsigilClient.StartTrialAsync"/> refused locally: this device already stores a license.</summary>
     public const string AlreadyLicensed = "already_licensed";
 
-    /// <summary>
-    /// <see cref="VelsigilClient.StartTrialAsync"/> refused locally: the store could not be read, so it cannot tell
-    /// whether this device already holds a license (a failed read is never "nothing stored"). Nothing was sent; try
-    /// again once the store can be read.
-    /// </summary>
+    /// <summary><see cref="VelsigilClient.StartTrialAsync"/> refused locally: the store could not be read.</summary>
     public const string StoreUnavailable = "store_unavailable";
 }

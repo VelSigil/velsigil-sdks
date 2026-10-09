@@ -116,7 +116,7 @@ public class StoreTests
     [Fact]
     public void Default_store_falls_back_to_the_pre_rename_directory()
     {
-        // SDK versions released under the former product name stored state in <LocalApplicationData>/Veltrix.
+        // Pre-rename SDK versions stored state in <LocalApplicationData>/Veltrix.
         var store = FileStore.CreateDefault("MyApp");
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.DoNotVerify);
         Assert.Equal(Path.GetFullPath(FileStore.GetDefaultDirectory("MyApp")), store.DirectoryPath);

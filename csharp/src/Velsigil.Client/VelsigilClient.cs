@@ -13,25 +13,10 @@ using HardwareIdProvider = Velsigil.Client.HardwareId;
 
 namespace Velsigil.Client;
 
-/// <summary>
-/// Client for the Velsigil license server (<c>/api/client/v1</c>).
-/// </summary>
+/// <summary>Client for the Velsigil license server (<c>/api/client/v1</c>).</summary>
 /// <remarks>
-/// <para>Security model: every successful response must carry a valid Ed25519 signature made with the
-/// product key passed to the constructor (the <c>kid</c> field is ignored for key selection), echo the
-/// fresh 32-byte nonce of the request, name the configured product and request type, and (for
-/// device-bound requests) carry a lease / activation of this device's hardware id. Anything else is reported as
-/// <see cref="ResultCodes.InvalidResponse"/>. Requests carry a timestamp from the local clock corrected
-/// by the offset learned from a signed <c>clock_skew</c> response (one automatic retry).</para>
-/// <para>Business failures never throw: inspect <see cref="VelsigilResult.Ok"/> and
-/// <see cref="VelsigilResult.Code"/>. Methods throw only for programming errors (invalid arguments,
-/// use after <see cref="Dispose"/>) and <see cref="OperationCanceledException"/> when the caller's
-/// <see cref="CancellationToken"/> is cancelled (timeouts are reported as
-/// <see cref="ResultCodes.NetworkError"/>).</para>
-/// <para>Instances are thread-safe and intended to be long-lived (one per product per process). The device-bound calls
-/// (<see cref="ValidateAsync"/>, <see cref="StartTrialAsync"/>, <see cref="DeactivateAsync"/>,
-/// <see cref="GetDownloadAsync"/> and <see cref="ClearStoredState"/>) are serialized per client: each one reads the
-/// stored state, sends its request and persists the answer before the next one starts.</para>
+/// Only answers signed with the constructor's key and bound to the request are trusted.
+/// Business failures never throw: check <see cref="VelsigilResult.Ok"/>. Thread-safe; keep one instance per product.
 /// </remarks>
 public sealed class VelsigilClient : IDisposable
 {
@@ -53,12 +38,10 @@ public sealed class VelsigilClient : IDisposable
     private const int NonceBytes = 32;
     private const int DownloadBufferSize = 81920;
 
-    // already_licensed (SPEC 14): StartTrialAsync on a device that already holds a license (secret or lease).
     private const string AlreadyLicensedMessage =
         "This device already holds a license for this product (a stored device secret or offline lease); a free trial cannot " +
         "replace it. Validate the saved license key instead, or call DeactivateAsync() or ClearStoredState() first. No request was sent.";
 
-    // store_unavailable (SPEC 14): StartTrialAsync could not read the store, so it cannot tell whether a license is stored.
     private const string StoreUnavailableMessage =
         "The license store could not be read, so it is unknown whether this device already holds a license for this product; " +
         "a free trial was not started. Try again once the store can be read. No request was sent.";
@@ -67,11 +50,7 @@ public sealed class VelsigilClient : IDisposable
     private static readonly TimeSpan MaxTimeout = TimeSpan.FromMinutes(10);
     private static readonly string UserAgent = "Velsigil.Client/" + SdkVersion + " (.NET)";
 
-    /// <summary>
-    /// Signed denials after which a stored offline lease must no longer be honoured. This exact set is
-    /// binding for every Velsigil SDK (SPEC section 14); any other signed failure (product_paused,
-    /// outdated_version, activation_rate_limited, clock_skew, replay_detected, ...) keeps the lease.
-    /// </summary>
+    /// <summary>Signed denials that make the stored lease unusable; the same set in every Velsigil SDK.</summary>
     public static IReadOnlyCollection<string> LeaseRevokingCodes => RevokingCodeSet;
 
     private static readonly HashSet<string> RevokingCodeSet = new HashSet<string>(StringComparer.Ordinal)
@@ -103,36 +82,20 @@ public sealed class VelsigilClient : IDisposable
     private readonly bool _allowInsecureHttp;
     private readonly string _hwid;
 
-    // Serializes the device-bound calls (validate, start trial, deactivate, download, ClearStoredState): reading the
-    // stored state, the request and persisting the answer form one step, as in the Node and Python SDKs. So a device
-    // secret issued to the first of two concurrent activations is sent by the second, and the already_licensed check of
-    // a trial start cannot be overtaken by a concurrent validation. Never disposed (only AvailableWaitHandle needs that).
+    // Serializes device-bound calls so a stored secret or the trial check cannot be overtaken.
+    // Never disposed: only AvailableWaitHandle needs that.
     private readonly SemaphoreSlim _deviceLock = new SemaphoreSlim(1, 1);
     private long _clockOffsetSeconds;
     private int _disposed;
 
     /// <summary>Creates a client for one product.</summary>
-    /// <param name="apiUrl">
-    /// The Velsigil server URL, e.g. <c>https://licenses.example.com</c> (a URL already ending in
-    /// <c>/api/client/v1</c> is accepted too). Must be https unless the host is localhost, 127.0.0.1 or
-    /// ::1, or <see cref="VelsigilClientOptions.AllowInsecureHttp"/> is set.
-    /// </param>
+    /// <param name="apiUrl">The Velsigil server URL; https unless the host is loopback or <see cref="VelsigilClientOptions.AllowInsecureHttp"/> is set.</param>
     /// <param name="productId">The product id (UUID) from the panel.</param>
-    /// <param name="publicKeyBase64">
-    /// The product's Ed25519 public key (standard base64, from the panel's Integration tab). Embed it in
-    /// your code; it is the only key whose signatures are trusted. The public keys of the SDK test vectors are
-    /// refused unless the host of <paramref name="apiUrl"/> is localhost, 127.0.0.1 or ::1: their private keys
-    /// are published, so anyone could sign answers for them.
-    /// </param>
+    /// <param name="publicKeyBase64">The product's Ed25519 public key from the panel; embed it in your code.</param>
     /// <param name="options">Optional settings.</param>
-    /// <exception cref="ArgumentException">
-    /// An argument is invalid, or <paramref name="publicKeyBase64"/> is a published test key and the API URL is not
-    /// loopback.
-    /// </exception>
+    /// <exception cref="ArgumentException">An argument is invalid, or a published test key is used with a non-loopback URL.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The timeout is outside 1 s .. 10 min.</exception>
-    /// <exception cref="PlatformNotSupportedException">
-    /// No machine id could be read and no <see cref="VelsigilClientOptions.HardwareId"/> was supplied.
-    /// </exception>
+    /// <exception cref="PlatformNotSupportedException">No machine id could be read and no <see cref="VelsigilClientOptions.HardwareId"/> was supplied.</exception>
     public VelsigilClient(string apiUrl, string productId, string publicKeyBase64, VelsigilClientOptions? options = null)
     {
         options ??= new VelsigilClientOptions();
@@ -140,8 +103,7 @@ public sealed class VelsigilClient : IDisposable
         _apiBase = BuildApiBase(apiUrl, _allowInsecureHttp, out _serverRoot);
         _productId = NormalizeProductId(productId);
         _verifier = Ed25519Verifier.FromBase64(publicKeyBase64);
-        // The test-vector keys' private keys are published: anyone could sign answers for them. Allowed only against a
-        // loopback server, the same hosts plain http is allowed for (one helper, so the two rules cannot drift apart).
+        // Published test keys are only allowed for loopback hosts, the same rule as plain http.
         if (_verifier.IsPublishedTestKey && !IsLoopbackHost(_serverRoot))
         {
             throw new ArgumentException(PublishedTestKeys.RefusalMessage, nameof(publicKeyBase64));
@@ -184,18 +146,11 @@ public sealed class VelsigilClient : IDisposable
     /// <summary>Server-minus-local clock offset in seconds, learned from a signed <c>clock_skew</c> response.</summary>
     public long ClockOffsetSeconds => Interlocked.Read(ref _clockOffsetSeconds);
 
-    /// <summary>
-    /// Computes this machine's hardware id (SPEC 10.6). See <see cref="Velsigil.Client.HardwareId"/>.
-    /// </summary>
+    /// <summary>Computes this machine's hardware id; see <see cref="Velsigil.Client.HardwareId"/>.</summary>
     /// <exception cref="PlatformNotSupportedException">No machine id is available.</exception>
     public static string GetHardwareId() => HardwareIdProvider.Get();
 
-    // ---- Online operations --------------------------------------------------------------------------
-
-    /// <summary>
-    /// Validates <paramref name="licenseKey"/> for this device, activating it when the license has a free
-    /// slot. On success the issued device secret and offline lease are persisted in the store.
-    /// </summary>
+    /// <summary>Validates the license on this device, activating it when a slot is free; stores the secret and lease.</summary>
     public Task<VelsigilResult> ValidateAsync(string licenseKey, ValidateOptions? options = null, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -219,21 +174,8 @@ public sealed class VelsigilClient : IDisposable
         }, cancellationToken);
     }
 
-    /// <summary>
-    /// Starts a free trial of the product on this device without a license key (SPEC 9.7 "In-app trials"; the
-    /// seller turns on the in-app channel of the product's trial offer). On success
-    /// <see cref="VelsigilResult.TrialKey"/> holds the new license key: store it right away (the server can never
-    /// send it again; the SDK does not persist it) and use <see cref="ValidateAsync"/> from then on. The device
-    /// secret and the offline lease are stored like after a validation. Signed failures:
-    /// <see cref="ResultCodes.TrialAlreadyUsed"/>, <see cref="ResultCodes.TrialUnavailable"/>,
-    /// <see cref="ResultCodes.TrialEmailRequired"/> / <see cref="ResultCodes.TrialEmailInvalid"/> /
-    /// <see cref="ResultCodes.TrialEmailNotAccepted"/> and <see cref="ResultCodes.TrialConfirmationSent"/> (the key
-    /// arrives by e-mail); <see cref="ResultCodes.PanelTooOld"/> when the server predates in-app trials. Call it only
-    /// when the app has no key yet: when a device secret or an offline lease is already stored for the product it
-    /// returns <see cref="ResultCodes.AlreadyLicensed"/> without sending anything and leaves the stored state
-    /// untouched, so a trial never replaces this device's license. When the store cannot be read it returns
-    /// <see cref="ResultCodes.StoreUnavailable"/> (nothing sent): it cannot tell whether a license is stored.
-    /// </summary>
+    /// <summary>Starts an in-app free trial without a license key; <see cref="VelsigilResult.TrialKey"/> holds the new key.</summary>
+    /// <remarks>The server sends the trial key only once; store it. Refused (<see cref="ResultCodes.AlreadyLicensed"/>) if a license is stored.</remarks>
     public Task<VelsigilResult> StartTrialAsync(StartTrialOptions? options = null, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -247,14 +189,13 @@ public sealed class VelsigilClient : IDisposable
         var version = options?.Version;
         return WithDeviceLockAsync(() =>
         {
-            // The trial answer would overwrite the stored device secret and lease of this device's license (a paid one
-            // included): refuse locally, before any request and without touching the store. Checked under the device
-            // lock, so no concurrent validation can store a license between this check and the trial request.
+            // Refuse locally so a trial never overwrites this device's stored license.
+            // Checked under the device lock, so no concurrent validation slips in between.
             var secret = ReadStore(store => store.GetDeviceSecret(_productId), out var secretRead);
             var lease = ReadStore(store => store.GetLeaseToken(_productId), out var leaseRead);
             if (!secretRead || !leaseRead)
             {
-                // A failed read is not "nothing stored": the store may hold this device's (paid) license. Fail closed.
+                // A failed read is not "nothing stored"; fail closed.
                 return Task.FromResult(VelsigilResult.Failure(ResultCodes.StoreUnavailable, StoreUnavailableMessage, CurrentUnixTime()));
             }
             if (!string.IsNullOrEmpty(secret) || !string.IsNullOrEmpty(lease))
@@ -272,9 +213,7 @@ public sealed class VelsigilClient : IDisposable
         }, cancellationToken);
     }
 
-    /// <summary>
-    /// Releases this device's activation slot. On success the stored device secret and lease are removed.
-    /// </summary>
+    /// <summary>Releases this device's activation slot; on success the stored secret and lease are removed.</summary>
     public Task<VelsigilResult> DeactivateAsync(string licenseKey, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -292,11 +231,7 @@ public sealed class VelsigilClient : IDisposable
         }, cancellationToken);
     }
 
-    /// <summary>
-    /// Asks whether a newer release than <paramref name="currentVersion"/> is published. Does not need a
-    /// license key. <see cref="VelsigilResult.Update"/> is null with code <c>no_release</c> when nothing is
-    /// published.
-    /// </summary>
+    /// <summary>Asks for a release newer than <paramref name="currentVersion"/>; no license key needed.</summary>
     public Task<VelsigilResult> CheckUpdateAsync(string? currentVersion = null, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -309,10 +244,7 @@ public sealed class VelsigilClient : IDisposable
         return ExecuteAsync(TypeUpdateCheck, "update-check", body, cancellationToken);
     }
 
-    /// <summary>
-    /// Requests a short-lived download link for a release (latest when <paramref name="version"/> is null).
-    /// The device must already be activated. Use <see cref="DownloadFileAsync"/> to fetch and verify it.
-    /// </summary>
+    /// <summary>Requests a short-lived download link (latest release when <paramref name="version"/> is null).</summary>
     public Task<VelsigilResult> GetDownloadAsync(string licenseKey, string? version = null, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -332,24 +264,8 @@ public sealed class VelsigilClient : IDisposable
         }, cancellationToken);
     }
 
-    /// <summary>
-    /// Validates online and, <b>only</b> when the license server is unavailable, falls back to the stored offline
-    /// lease. Unavailable means: no HTTP response at all (<see cref="ResultCodes.NetworkError"/>: DNS, connection, TLS,
-    /// reset, timeout), or an <b>unsigned HTTP 5xx</b> answer whatever its body (a Velsigil error body, an HTML page of
-    /// a reverse proxy, an empty or garbled body): <see cref="ResultCodes.InternalError"/>, or
-    /// <see cref="ResultCodes.NetworkError"/> for a gateway 502/503/504 without a Velsigil error body. That covers a
-    /// server whose database is down and a proxy whose app is down. Every other answer is returned as is: signed
-    /// answers (revoked, expired, banned, ...), 4xx answers (<see cref="ResultCodes.RateLimited"/>,
-    /// <see cref="ResultCodes.ValidationError"/>, ...) and <see cref="ResultCodes.InvalidResponse"/>. When no lease is
-    /// stored, the original online result (<see cref="ResultCodes.NetworkError"/> or
-    /// <see cref="ResultCodes.InternalError"/>) is returned (as in every Velsigil SDK); a stored lease that is unusable
-    /// gives <see cref="ResultCodes.LeaseExpired"/> or <see cref="ResultCodes.LeaseInvalid"/>. Check
-    /// <see cref="VelsigilResult.Offline"/> to know which path was used. <see cref="ValidateAsync"/> itself never falls
-    /// back and always reports the real error. A result of the fallback (<see cref="ResultCodes.Ok"/>,
-    /// <see cref="ResultCodes.LeaseExpired"/>, <see cref="ResultCodes.LeaseInvalid"/>) carries the
-    /// <see cref="VelsigilResult.RetryAfter"/> of the failed online answer (the <c>Retry-After</c> of a 503, e.g. 30 s
-    /// while the server's database is unreachable), so the app knows when to try online again.
-    /// </summary>
+    /// <summary>Validates online, falling back to the stored lease only when the server is unavailable (no response or unsigned 5xx).</summary>
+    /// <remarks>Signed and 4xx answers are returned as they are; check <see cref="VelsigilResult.Offline"/>.</remarks>
     public async Task<VelsigilResult> ValidateWithOfflineFallbackAsync(string licenseKey, ValidateOptions? options = null, CancellationToken cancellationToken = default)
     {
         var online = await ValidateAsync(licenseKey, options, cancellationToken).ConfigureAwait(false);
@@ -360,12 +276,7 @@ public sealed class VelsigilClient : IDisposable
         return offline.WithRetryAfter(online.RetryAfter);
     }
 
-    // ---- Offline -----------------------------------------------------------------------------------
-
-    /// <summary>
-    /// Validates the stored offline lease without network access: signature (pinned key), type, product,
-    /// this device's hardware id and expiry (local clock plus the learned server offset).
-    /// </summary>
+    /// <summary>Validates the stored offline lease without network access.</summary>
     public VelsigilResult ValidateOffline()
     {
         ThrowIfDisposed();
@@ -380,10 +291,7 @@ public sealed class VelsigilClient : IDisposable
         return VelsigilResult.FromLease(verification, token!, now);
     }
 
-    /// <summary>
-    /// Removes the stored device secret and offline lease for this product (e.g. on sign-out). Waits for a device-bound
-    /// call in progress to finish first, so its answer cannot store the state again afterwards.
-    /// </summary>
+    /// <summary>Removes the stored device secret and lease; waits for a device-bound call in progress.</summary>
     public void ClearStoredState()
     {
         ThrowIfDisposed();
@@ -402,13 +310,7 @@ public sealed class VelsigilClient : IDisposable
         }
     }
 
-    // ---- Downloads ---------------------------------------------------------------------------------
-
-    /// <summary>
-    /// Downloads a release granted by <see cref="GetDownloadAsync"/> to <paramref name="destinationPath"/>,
-    /// verifying the byte count and SHA-256 against the signed <see cref="DownloadInfo"/>. The file is
-    /// written to a temporary file next to the destination and only moved into place after verification.
-    /// </summary>
+    /// <summary>Downloads a release from <see cref="GetDownloadAsync"/> and verifies its size and SHA-256 before moving it into place.</summary>
     /// <param name="download">The signed download grant.</param>
     /// <param name="destinationPath">Target file path (overwritten on success).</param>
     /// <param name="progress">Optional progress callback receiving the number of bytes received.</param>
@@ -513,16 +415,12 @@ public sealed class VelsigilClient : IDisposable
         }
     }
 
-    // ---- Lifetime ----------------------------------------------------------------------------------
-
     /// <summary>Disposes the internally created <see cref="HttpClient"/> (an injected one is left alone).</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         if (_ownsHttpClient) _http.Dispose();
     }
-
-    // ---- Request pipeline --------------------------------------------------------------------------
 
     private readonly struct Exchange
     {
@@ -541,10 +439,7 @@ public sealed class VelsigilClient : IDisposable
         public static Exchange Fail(VelsigilResult failure) => new Exchange(null, failure);
     }
 
-    /// <summary>
-    /// Runs one device-bound call under <see cref="_deviceLock"/>: <paramref name="operation"/> reads the stored state,
-    /// sends the request and persists the answer (<see cref="ExecuteAsync"/>) before the next device-bound call starts.
-    /// </summary>
+    /// <summary>Runs one device-bound call under the device lock.</summary>
     private async Task<VelsigilResult> WithDeviceLockAsync(Func<Task<VelsigilResult>> operation, CancellationToken cancellationToken)
     {
         await _deviceLock.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -563,7 +458,7 @@ public sealed class VelsigilClient : IDisposable
         var uri = new Uri(_apiBase, endpoint);
         for (var attempt = 1; ; attempt++)
         {
-            // Fresh nonce and timestamp for every attempt: a retry is a brand-new request.
+            // Fresh nonce and timestamp per attempt: a retry is a new request.
             var nonce = Base64Url.Encode(Crypto.RandomBytes(NonceBytes));
             var bytes = body.Build(nonce, CurrentUnixTime());
             Exchange exchange;
@@ -573,7 +468,7 @@ public sealed class VelsigilClient : IDisposable
             }
             finally
             {
-                // The body contains the license key and device secret; do not leave it lying around.
+                // The body holds the license key and device secret; clear it.
                 Array.Clear(bytes, 0, bytes.Length);
             }
 
@@ -582,13 +477,12 @@ public sealed class VelsigilClient : IDisposable
 
             if (!payload.Ok && string.Equals(payload.Code, ResultCodes.ClockSkew, StringComparison.Ordinal))
             {
-                // Authenticated (signed, nonce-bound) server time: learn the offset, retry exactly once.
+                // Signed, nonce-bound server time: learn the offset and retry once.
                 LearnClockOffset(payload.ServerTime);
                 if (attempt == 1) continue;
             }
 
-            // A download grant must be usable under the transport policy (https, or http to loopback /
-            // with AllowInsecureHttp); reject it already here, like the other Velsigil SDKs.
+            // Reject a download URL that breaks the transport policy here, like the other SDKs.
             if (payload.Download != null && !TryResolveDownloadUri(payload.Download.Url, out _))
             {
                 return InvalidResponse("The server returned a download URL that is not allowed (https is required).");
@@ -613,8 +507,7 @@ public sealed class VelsigilClient : IDisposable
             using var abort = timeout.Token.Register(DisposeState, response);
             var status = (int)response.StatusCode;
 
-            // Redirects are never followed (CLIENT_PROTOCOL section 2). An injected HttpClient may follow
-            // them anyway: an answer that does not come from the requested URI is invalid, even when signed.
+            // Redirects are never followed; an answer from another URI is invalid even when signed.
             if (WasRedirected(response, uri))
             {
                 return Exchange.Fail(InvalidResponse("The server redirected the request."));
@@ -628,8 +521,7 @@ public sealed class VelsigilClient : IDisposable
                     return Exchange.Fail(InvalidResponse("The response exceeded the maximum allowed size."));
                 }
 
-                // Device-bound requests (all but update_check) carry the hwid: the signed lease/activation
-                // must then belong to this device.
+                // Device-bound requests (all but update_check): the lease/activation must belong to this device.
                 var boundHwid = string.Equals(type, TypeUpdateCheck, StringComparison.Ordinal) ? null : _hwid;
                 var verdict = EnvelopeVerifier.Verify(_verifier, raw, nonce, _productId, type, boundHwid, out var payload);
                 if (verdict != EnvelopeStatus.Valid || payload is null)
@@ -643,9 +535,7 @@ public sealed class VelsigilClient : IDisposable
             var errorBody = await HttpHelpers.ReadBodyAsync(response.Content, MaxErrorBodyBytes, timeout.Token).ConfigureAwait(false);
             var code = HttpHelpers.MapUnsignedErrorCode(status, errorBody, out var requestId, string.Equals(type, TypeTrial, StringComparison.Ordinal));
             requestId ??= HttpHelpers.ReadRequestIdHeader(response);
-            // The Retry-After of every 429 or 503, whatever code it maps to (rate_limited; network_error for a gateway's
-            // 503 or the empty 503 of a server whose database is unreachable, CLIENT_PROTOCOL 5.3; internal_error for
-            // 503 service_busy). Identical in every Velsigil SDK.
+            // Retry-After of every 429 and 503, the same in every Velsigil SDK.
             var retryAfter = status == 429 || status == 503
                 ? HttpHelpers.ReadRetryAfter(response.Headers, _clock())
                 : null;
@@ -677,11 +567,10 @@ public sealed class VelsigilClient : IDisposable
         switch (type)
         {
             case TypeValidate:
-            case TypeTrial: // a started trial is a validation of the new license on this device
+            case TypeTrial: // a started trial is a validation of the new license
                 if (payload.Ok)
                 {
-                    // Replace (or clear, when the product issues no lease) the stored lease. A lease that
-                    // would not verify for this product and device is never stored.
+                    // Replace or clear the stored lease; one that would not verify here is never stored.
                     var token = payload.Lease?.Token;
                     if (token != null && !LeaseVerifier.Verify(token, _verifier, _productId, _hwid, payload.ServerTime).IsValid)
                     {
@@ -696,8 +585,7 @@ public sealed class VelsigilClient : IDisposable
                 break;
 
             case TypeDeactivate:
-                // ok, or device_not_found (the server no longer knows this device): the secret and the
-                // lease are worthless now.
+                // device_not_found also makes the secret and lease worthless.
                 if (payload.Ok || string.Equals(payload.Code, ResultCodes.DeviceNotFound, StringComparison.Ordinal))
                 {
                     WriteStore(store =>
@@ -718,8 +606,6 @@ public sealed class VelsigilClient : IDisposable
         }
     }
 
-    // ---- Helpers -----------------------------------------------------------------------------------
-
     private long LocalUnixTime() => _clock().ToUnixTimeSeconds();
 
     private long CurrentUnixTime() => LocalUnixTime() + Interlocked.Read(ref _clockOffsetSeconds);
@@ -734,10 +620,7 @@ public sealed class VelsigilClient : IDisposable
 
     private string? ReadStore(Func<IVelsigilStore, string?> read) => ReadStore(read, out _);
 
-    /// <summary>
-    /// One store read. <paramref name="ok"/> is false when the store threw: the value is then unknown, which is not the
-    /// same as "nothing stored" (the start of a trial refuses on it).
-    /// </summary>
+    /// <summary>One store read; <paramref name="ok"/> is false when the store threw (not "nothing stored").</summary>
     private string? ReadStore(Func<IVelsigilStore, string?> read, out bool ok)
     {
         try
@@ -815,7 +698,7 @@ public sealed class VelsigilClient : IDisposable
                 return VelsigilResult.Failure(ResultCodes.RateLimited, HttpHelpers.MessageFor(ResultCodes.RateLimited, status), now, status, requestId,
                     HttpHelpers.ReadRetryAfter(response.Headers, _clock()));
             case 503:
-                // The Retry-After of every 429 and 503, as in SendAsync (e.g. 503 service_busy with Retry-After: 5).
+                // Retry-After of every 429 and 503, as in SendAsync.
                 return VelsigilResult.Failure(ResultCodes.NetworkError, HttpHelpers.MessageFor(ResultCodes.NetworkError, status), now, status, requestId,
                     HttpHelpers.ReadRetryAfter(response.Headers, _clock()));
             case 502:
@@ -847,15 +730,8 @@ public sealed class VelsigilClient : IDisposable
         }
     }
 
-    /// <summary>
-    /// The offline-fallback rule (<see cref="ValidateWithOfflineFallbackAsync"/>): true when <paramref name="online"/> is
-    /// no decision of the license server. That is <see cref="ResultCodes.NetworkError"/> (no HTTP response, or a gateway
-    /// 502/503/504 without a Velsigil error body) or any unsigned answer with an HTTP 5xx status, whatever its body and
-    /// the code it maps to. The status decides, not the code: a 4xx carrying <c>internal_error</c> stays final. Safe
-    /// because an attacker who can inject an unsigned 5xx can as well drop the connection, which falls back anyway, and
-    /// the lease itself is signed, bound to this device and time-limited. Signed answers and
-    /// <see cref="ResultCodes.InvalidResponse"/> (always reported with status 200) are final.
-    /// </summary>
+    /// <summary>Offline-fallback rule: no HTTP response, or any unsigned 5xx whatever its body.</summary>
+    /// <remarks>Safe: whoever can inject an unsigned 5xx can also drop the connection, and the lease is signed.</remarks>
     private static bool IsServerUnavailable(VelsigilResult online)
     {
         if (online.Ok || online.Verified || online.Offline) return false;
@@ -872,11 +748,7 @@ public sealed class VelsigilClient : IDisposable
 
     private static void DisposeState(object? state) => (state as IDisposable)?.Dispose();
 
-    /// <summary>
-    /// True when the response answers another URI than the one requested: an injected
-    /// <see cref="HttpClient"/> followed a redirect (the SDK's own client never does). A handler that
-    /// does not report the request message is trusted to have sent it to <paramref name="requested"/>.
-    /// </summary>
+    /// <summary>True when an injected <see cref="HttpClient"/> followed a redirect to another URI.</summary>
     private static bool WasRedirected(HttpResponseMessage response, Uri requested)
     {
         var answered = response.RequestMessage?.RequestUri;
@@ -1006,9 +878,7 @@ public sealed class VelsigilClient : IDisposable
         if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) || host == "127.0.0.1") return true;
         if (uri.HostNameType != UriHostNameType.IPv6) return false;
 
-        // ::1, compared as address bytes: Uri.Host spells it "[::1]" on .NET Core but
-        // "[0000:0000:0000:0000:0000:0000:0000:0001]" on .NET Framework (netstandard2.0 asset). Exactly ::1: not the
-        // IPv4-mapped ::ffff:127.0.0.1, which Uri.IsLoopback would accept. Uri.Host never carries a scope id.
+        // Compare ::1 as bytes: .NET Framework spells it in full, and ::ffff:127.0.0.1 must not pass.
         var text = host.Length > 2 && host[0] == '[' && host[host.Length - 1] == ']' ? host.Substring(1, host.Length - 2) : host;
         if (!System.Net.IPAddress.TryParse(text, out var address) || address.AddressFamily != AddressFamily.InterNetworkV6) return false;
         var bytes = address.GetAddressBytes();

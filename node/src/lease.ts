@@ -15,6 +15,7 @@ import type { LeasePayload } from './types.js';
 const MAX_TOKEN_LENGTH = 16 * 1024;
 const SEGMENT_RE = /^[A-Za-z0-9_-]+={0,2}$/;
 
+/** Outcome of an offline lease check. */
 export type LeaseStatus =
   | 'valid'
   | 'expired'
@@ -23,32 +24,23 @@ export type LeaseStatus =
   | 'hwid_mismatch'
   | 'malformed';
 
+/** Result of {@link verifyLease}. */
 export type LeaseVerification =
   | { status: 'valid'; payload: LeasePayload }
   | { status: 'expired'; reason: string; payload: LeasePayload }
   | { status: 'product_mismatch' | 'hwid_mismatch'; reason: string; payload: LeasePayload }
   | { status: 'invalid_signature' | 'malformed'; reason: string };
 
+/** What a lease must match. */
 export interface LeaseExpectations {
-  /** The product this client is configured for. */
   productId: string;
-  /** The hardware id string of this machine (as sent to the server); its SHA-256 must match. */
+  /** This machine's hardware id as sent to the server. */
   hwid: string;
   /** Current time in unix seconds. */
   now: number;
 }
 
-/**
- * Verifies an offline lease token `base64url(JSON) "." base64url(Ed25519 signature)`.
- *
- * The signature over the ASCII bytes of the first segment is checked with ONLY the given public key
- * before the payload is decoded. Afterwards: `typ === 'lease'`, matching productId, matching
- * `hwidHash = sha256(hwid)`, and `now < exp`. A lease never outlives the license itself.
- *
- * Throws `VelsigilError('invalid_public_key')` for an invalid key or one of the public test keys of the SDK
- * test vectors, whose private keys are published (this helper has no API URL, so unlike the client
- * constructor it refuses them for local servers too).
- */
+/** Verifies an offline lease token; throws `invalid_public_key` for a bad or published test key. */
 export function verifyLease(
   publicKey: string | KeyObject,
   token: unknown,
@@ -57,11 +49,7 @@ export function verifyLease(
   return verifyLeaseWith(refusePublishedTestKey(resolvePublicKey(publicKey)), token, expected);
 }
 
-/**
- * Internal (not exported from the package): {@link verifyLease} without the published-test-key refusal. For
- * `VelsigilClient`, whose constructor already refused those keys outside loopback hosts, for `verifyEnvelope`'s
- * device-binding check (its key is already checked), and for the SDK's own vector tests.
- */
+/** Internal: callers have already checked the key against the published test keys. */
 export function verifyLeaseAllowingTestKeys(
   publicKey: string | KeyObject,
   token: unknown,
@@ -118,7 +106,6 @@ function parseLeasePayload(value: unknown): LeasePayload | null {
   const licenseExpiresAt = value.licenseExpiresAt ?? null;
   if (!(licenseExpiresAt === null || isUnixTime(licenseExpiresAt))) return null;
   if (!isUnixTime(value.iat) || !isUnixTime(value.exp)) return null;
-  // Optional free-trial flag (SPEC 9.7): absent/null = not a trial; any other non-boolean is malformed.
   const trial = value.trial;
   if (!(trial === null || trial === undefined || typeof trial === 'boolean')) return null;
   return {

@@ -5,14 +5,8 @@ using LeaseOutcome = Velsigil.Client.LeaseStatus;
 
 namespace Velsigil.Client;
 
-/// <summary>
-/// The outcome of a client call. Business failures (expired license, device limit, ...) and transport
-/// failures are reported here with <see cref="Ok"/> = false and a <see cref="Code"/>; they never throw.
-/// </summary>
-/// <remarks>
-/// <see cref="Ok"/> can only be true for a response whose Ed25519 signature, nonce, product id and request
-/// type were verified, or for a verified, unexpired offline lease bound to this device.
-/// </remarks>
+/// <summary>Outcome of a client call; failures are reported with <see cref="Ok"/> = false and never throw.</summary>
+/// <remarks><see cref="Ok"/> is true only for a verified signed response or a valid offline lease.</remarks>
 public sealed class VelsigilResult
 {
     private VelsigilResult(bool ok, string code, string message, long referenceTimeUnix)
@@ -56,16 +50,10 @@ public sealed class VelsigilResult
     /// <summary>True when the result was produced from the stored offline lease, not the server.</summary>
     public bool Offline { get; private set; }
 
-    /// <summary>
-    /// For offline results with a stored lease: the detailed verification outcome (why a lease is
-    /// <see cref="ResultCodes.LeaseInvalid"/>); null otherwise.
-    /// </summary>
+    /// <summary>Offline results with a stored lease: why the lease is or is not valid; null otherwise.</summary>
     public LeaseStatus? LeaseStatus { get; private set; }
 
-    /// <summary>
-    /// True when the result is backed by a verified signature (signed server response or signed lease).
-    /// Unsigned HTTP errors and SDK-side failures are never verified.
-    /// </summary>
+    /// <summary>True when the result is backed by a verified signature (signed response or lease).</summary>
     public bool Verified { get; private set; }
 
     /// <summary>Authoritative server time from a signed response (unix seconds).</summary>
@@ -74,40 +62,19 @@ public sealed class VelsigilResult
     /// <summary>HTTP status for unsigned/HTTP-level failures; 200 for signed responses; null otherwise.</summary>
     public int? HttpStatus { get; private set; }
 
-    /// <summary>
-    /// How long the server asked to wait before trying again: the <c>Retry-After</c> header (delta-seconds or HTTP
-    /// date, capped at one day) of every HTTP 429 or 503 answer, whatever code it maps to
-    /// (<see cref="ResultCodes.RateLimited"/>; <see cref="ResultCodes.NetworkError"/> for the empty 503 of a server whose
-    /// database is unreachable, or a gateway's 503; <see cref="ResultCodes.InternalError"/> for 503 <c>service_busy</c>;
-    /// <see cref="VelsigilClient.DownloadFileAsync"/> reports a 503 as <see cref="ResultCodes.NetworkError"/>).
-    /// The results of the offline fallback of <see cref="VelsigilClient.ValidateWithOfflineFallbackAsync"/>
-    /// (<see cref="ResultCodes.Ok"/>, <see cref="ResultCodes.LeaseExpired"/>, <see cref="ResultCodes.LeaseInvalid"/>)
-    /// carry the value of the failed online attempt, so the app knows when to try online again. Null when the header is
-    /// absent or unparseable, for every other status and for <see cref="VelsigilClient.ValidateOffline"/>.
-    /// </summary>
+    /// <summary>How long to wait before retrying, from the Retry-After of an HTTP 429 or 503 (capped at one day).</summary>
     public TimeSpan? RetryAfter { get; private set; }
 
-    /// <summary>
-    /// The license key of the free trial <see cref="VelsigilClient.StartTrialAsync"/> just started (ok results of
-    /// that method only; null otherwise). The server sends it once and can never send it again: store it right
-    /// away, like a key the user typed, and use it with <see cref="VelsigilClient.ValidateAsync"/> from then on. The
-    /// SDK never persists it, and <see cref="ToString"/> never shows it.
-    /// </summary>
+    /// <summary>Key of the trial <see cref="VelsigilClient.StartTrialAsync"/> just started. The server sends it only once; store it.</summary>
     public string? TrialKey { get; private set; }
 
-    /// <summary>
-    /// The time the result refers to (unix seconds): the server time for signed responses, otherwise the
-    /// client's clock (corrected by the learned server offset). Used by the expiry helpers.
-    /// </summary>
+    /// <summary>The time the result refers to (unix seconds): server time if signed, else the corrected local clock.</summary>
     public long ReferenceTimeUnix { get; }
 
     /// <summary>Feature flags of the license (from the response or, offline, from the lease).</summary>
     public IReadOnlyList<string> Features => License?.Features ?? LeaseClaims?.Features ?? (IReadOnlyList<string>)Array.Empty<string>();
 
-    /// <summary>
-    /// True when the result is successful <b>and</b> the license grants <paramref name="name"/>. Always
-    /// false for failed results, so a feature can never be unlocked by an expired/invalid response.
-    /// </summary>
+    /// <summary>True only when the result is ok and the license grants <paramref name="name"/>.</summary>
     public bool HasFeature(string name) => Ok && FeatureList.Contains(Features, name);
 
     /// <summary>License expiry (from the response or the offline lease); null for lifetime or unknown.</summary>
@@ -120,25 +87,13 @@ public sealed class VelsigilResult
         }
     }
 
-    /// <summary>
-    /// True when the license is a free trial (SPEC 9.7): the optional signed <c>trial</c> field of the response, or
-    /// of the stored lease for offline results. Use it with <see cref="DaysRemaining"/> for a "Trial: N days left"
-    /// notice; a purchase with the same e-mail keeps the key and turns this false at the next online validation.
-    /// </summary>
+    /// <summary>True when the license is a free trial (online or from the stored lease).</summary>
     public bool IsTrial => License != null ? License.IsTrial : LeaseClaims != null && LeaseClaims.IsTrial;
 
-    /// <summary>
-    /// The current trial's conversion reference (SPEC 9.7), or null: present on online results for a free trial a
-    /// purchase can still convert, also on <c>license_expired</c> (the moment to offer "Buy now"). Add it to the
-    /// "Buy now" link with <see cref="WithTrialRef"/>: the purchase then converts THIS trial into the paid license (same
-    /// key) whatever e-mail address the buyer pays with. A fresh one comes with every answer; offline results have none.
-    /// </summary>
+    /// <summary>The trial's conversion reference for a "Buy now" link (online results only), or null.</summary>
     public string? TrialRef => License?.TrialRef;
 
-    /// <summary>
-    /// <paramref name="buyUrl"/> with this trial's conversion reference (<c>velsigil_trial=&lt;ref&gt;</c>; Stripe Payment
-    /// Links: <c>client_reference_id</c>), or <paramref name="buyUrl"/> unchanged when there is none.
-    /// </summary>
+    /// <summary><paramref name="buyUrl"/> with this trial's conversion reference, or unchanged when there is none.</summary>
     public string WithTrialRef(string buyUrl) => TrialReference.Append(buyUrl, TrialRef);
 
     /// <summary>True when the license is known and has no expiry date.</summary>
@@ -148,12 +103,7 @@ public sealed class VelsigilResult
     /// <summary>Time left until the license expires, measured at <see cref="ReferenceTimeUnix"/>; null for lifetime/unknown.</summary>
     public TimeSpan? TimeRemaining => GetTimeRemaining(DateTimeOffset.FromUnixTimeSeconds(ReferenceTimeUnix));
 
-    /// <summary>
-    /// Days left until the license expires, rounded up (never negative), measured at <see cref="ReferenceTimeUnix"/>
-    /// (the signed server time online, the time of the check offline); null for lifetime/unknown. The "days left" rule
-    /// of CLIENT_PROTOCOL 5.2, the same in every Velsigil SDK: an N-day trial shows N right after
-    /// <see cref="VelsigilClient.StartTrialAsync"/>, 1 throughout its last day and 0 once expired.
-    /// </summary>
+    /// <summary>Days left until the license expires, rounded up, at <see cref="ReferenceTimeUnix"/>; null for lifetime/unknown.</summary>
     public int? DaysRemaining
     {
         get
@@ -184,8 +134,6 @@ public sealed class VelsigilResult
     /// <summary>A diagnostic summary. Never contains license keys, device secrets or lease tokens.</summary>
     public override string ToString() =>
         $"VelsigilResult(Ok={Ok}, Code={Code}, Offline={Offline}, Verified={Verified}, RequestId={RequestId ?? "-"})";
-
-    // ---- Factories (internal: results can only be produced by the SDK) ------------------------------
 
     internal static VelsigilResult FromPayload(SignedPayload payload) =>
         new VelsigilResult(payload.Ok, payload.Code, payload.Message, payload.ServerTime)
@@ -255,7 +203,6 @@ public sealed class VelsigilResult
             Offline = true,
             LeaseStatus = verification.Status,
             Verified = claims != null,
-            // Only expose claims and the token when they were authenticated.
             LeaseClaims = claims,
             Lease = claims != null ? new LeaseInfo(token, claims.ExpiresAtUnix) : null,
         };
@@ -264,10 +211,7 @@ public sealed class VelsigilResult
     internal static VelsigilResult OfflineFailure(string code, string message, long nowUnix) =>
         new VelsigilResult(false, code, message, nowUnix) { Offline = true };
 
-    /// <summary>
-    /// Sets <see cref="RetryAfter"/> on an offline result the SDK has just built and not handed out yet: the fallback of
-    /// <see cref="VelsigilClient.ValidateWithOfflineFallbackAsync"/> copies the failed online answer's value onto it.
-    /// </summary>
+    /// <summary>Copies the failed online attempt's retry-after onto an offline fallback result.</summary>
     internal VelsigilResult WithRetryAfter(TimeSpan? retryAfter)
     {
         RetryAfter = retryAfter;

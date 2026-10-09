@@ -1,6 +1,5 @@
 [build-system]
-# Pinned exactly so every build of a release uses the same backend (Dependabot proposes updates).
-# setuptools >= 77 is needed for the SPDX `license` expression and `license-files` (PEP 639).
+# Pinned for reproducible builds; needs >= 77 for the SPDX `license` field.
 requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
@@ -9,8 +8,6 @@ name = "velsigil-client"
 version = "1.0.4"
 description = "Official Python client for the Velsigil license server (Ed25519-verified license validation, offline leases, updates)."
 readme = "README.md"
-# 3.10 is the oldest CPython the cryptography floor below still ships wheels for that is not long past its end of
-# life (3.9 ended 2025-10); drop it in a minor release once sellers have moved on.
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -33,15 +30,11 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
-# cryptography >= 50.0.0: the first release without a published advisory. 48.0.1 fixed the bundled OpenSSL
-# (GHSA-537c-gmf6-5ccf; the Ed25519 checks of this SDK run in that OpenSSL); 49.0.0 and 50.0.0 fixed X.509 path
-# building and name constraints (GHSA-jwv3-5hgf-82ww, GHSA-m2h6-j472-rp4c) and a PKCS#7 decryption oracle
-# (GHSA-g6cj-pr64-35w5). This SDK never calls that code, but a floor without known advisories keeps installs of the
-# SDK from pulling in a vulnerable cryptography (owner decision, 2026-10-08, before the first release).
+# Floor at the first cryptography release without a published security advisory.
 dependencies = ["cryptography>=50.0.0"]
 
 [project.optional-dependencies]
-# PyNaCl >= 1.6.2 bundles a libsodium with the fix for GHSA-mrfv-m5wm-5w6w (Ed25519 input validation).
+# 1.6.2 bundles a libsodium with fixed Ed25519 input validation.
 nacl = ["PyNaCl>=1.6.2"]
 
 [project.urls]

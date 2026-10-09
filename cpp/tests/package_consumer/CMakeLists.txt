@@ -1,12 +1,5 @@
-# A minimal application that consumes the SDK the way integrators do. CI builds it twice:
-#
-#   find_package:  after `cmake --install <build> --prefix <prefix>`
-#     cmake -S tests/package_consumer -B <dir> -DCMAKE_PREFIX_PATH=<prefix>
-#   FetchContent:  from the release source tarball (velsigil-cpp-<version>.tar.gz) and its SHA-256
-#     cmake -S tests/package_consumer -B <dir> -DVELSIGIL_CONSUMER_MODE=fetchcontent \
-#           -DVELSIGIL_URL=<path or URL of the tarball> -DVELSIGIL_URL_HASH=SHA256=<hex>
-#
-# The SDK's dependencies (libcurl, libsodium, nlohmann/json) must be findable in both modes.
+# Minimal SDK consumer; CI builds it via find_package (after cmake --install) and via FetchContent
+# from the release tarball. libcurl, libsodium and nlohmann/json must be findable in both modes.
 cmake_minimum_required(VERSION 3.16)
 
 project(velsigil_package_consumer LANGUAGES CXX)
@@ -23,7 +16,7 @@ elseif(VELSIGIL_CONSUMER_MODE STREQUAL "fetchcontent")
     message(FATAL_ERROR "fetchcontent mode needs -DVELSIGIL_URL=<tarball> and -DVELSIGIL_URL_HASH=SHA256=<hex>")
   endif()
   if(POLICY CMP0135)
-    cmake_policy(SET CMP0135 NEW)  # extracted files get the extraction time as their timestamp
+    cmake_policy(SET CMP0135 NEW)  # use the extraction time as file timestamps
   endif()
   include(FetchContent)
   FetchContent_Declare(velsigil URL "${VELSIGIL_URL}" URL_HASH "${VELSIGIL_URL_HASH}")

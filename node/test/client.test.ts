@@ -42,7 +42,7 @@ import * as sdk from '../src/index.js';
 
 const LICENSE_KEY = 'VSG-23456-789AB-CDEFG-HJKLM-NPQRS';
 const SECRET_1 = `dsk_${'A1b2C3d4'.repeat(5)}xyz`;
-const T0 = 1_767_225_600; // fixed "now" (unix seconds) for fake-clock tests
+const T0 = 1_767_225_600;
 
 let server: MockServer;
 
@@ -60,7 +60,6 @@ function makeClient(options: VelsigilClientOptions = {}, url = server.url): Vels
   return new VelsigilClient(url, PRODUCT_ID, PUBLIC_KEY, { hwid: TEST_HWID, ...options });
 }
 
-/** A loopback port with nothing listening on it. */
 async function closedPort(): Promise<number> {
   const probe = createServer();
   await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
@@ -69,7 +68,6 @@ async function closedPort(): Promise<number> {
   return port;
 }
 
-/** The error `fn` throws (it must throw). */
 function thrownBy(fn: () => unknown): unknown {
   try {
     fn();
@@ -79,14 +77,12 @@ function thrownBy(fn: () => unknown): unknown {
   throw new Error('expected a throw');
 }
 
-/** A product key pair: the public key as the panel shows it (standard base64 of the raw 32 bytes). */
 function productKeyPair(): { publicKey: string; privateKey: KeyObject } {
   const pair = generateKeyPairSync('ed25519');
   const { x } = pair.publicKey.export({ format: 'jwk' });
   return { publicKey: Buffer.from(x!, 'base64url').toString('base64'), privateKey: pair.privateKey };
 }
 
-/** The `code` of the VelsigilError `fn` throws, or null when it does not throw. */
 function thrownCode(fn: () => unknown): string | null {
   try {
     fn();
@@ -99,7 +95,6 @@ function thrownCode(fn: () => unknown): string | null {
 
 describe('configuration', () => {
   it('requires HTTPS except for loopback hosts', () => {
-    // A product's own key: the vector keys are refused for non-loopback hosts (see "published test keys").
     const key = randomPublicKey();
     expect(() => new VelsigilClient('http://licenses.example.com', PRODUCT_ID, key, { hwid: TEST_HWID })).toThrow(
       VelsigilError,
@@ -161,7 +156,7 @@ describe('published test keys (SDK test vectors)', () => {
     'https://127.0.0.2',
     'https://localhost.example.com',
     'https://[::2]',
-    // Look-alikes of loopback hosts: none of them is localhost, 127.0.0.1 or [::1] after URL parsing.
+    // Look-alikes that are not loopback after URL parsing.
     'https://127.0.0.1.nip.io',
     'https://localhost.',
     'https://localhost%2eevil.com',
@@ -181,7 +176,6 @@ describe('published test keys (SDK test vectors)', () => {
   const create = (url: string, key: string, options: VelsigilClientOptions = {}) => () =>
     new VelsigilClient(url, PRODUCT_ID, key, { hwid: TEST_HWID, ...options });
 
-  /** `fn` must throw exactly the published-test-key error. */
   function expectRefused(fn: () => unknown, label: string): void {
     const error = thrownBy(fn);
     expect(error, label).toBeInstanceOf(VelsigilError);
@@ -191,17 +185,13 @@ describe('published test keys (SDK test vectors)', () => {
 
   const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-  /**
-   * The same 32 bytes with the 2 unused low bits of the last base64 character set: a different string that
-   * base64 decoders (the SDK's included) read as the same key.
-   */
+  /** Same key bytes, different string: sets the unused low bits of the last base64 character. */
   function nonCanonical(key: string): string {
     const body = key.replace(/=+$/, '');
     const last = BASE64_ALPHABET.indexOf(body.slice(-1));
     return `${body.slice(0, -1)}${BASE64_ALPHABET.charAt(last | 3)}=`;
   }
 
-  /** Other encodings of the same 32 bytes: base64url, unpadded, surrounding whitespace, non-canonical tail bits. */
   function encodings(key: string): string[] {
     const raw = Buffer.from(key, 'base64');
     const loose = nonCanonical(key);
@@ -251,7 +241,6 @@ describe('published test keys (SDK test vectors)', () => {
           expect((thrown as VelsigilError).message).toBe(MESSAGE);
         }
       }
-      // A loopback name in the credentials, query or fragment never makes the host loopback (such URLs are refused).
       for (const url of ['https://localhost@evil.example.com', 'https://evil.example.com?@localhost', 'https://evil.example.com#@127.0.0.1']) {
         expect(create(url, testKey), url).toThrow(VelsigilError);
       }
@@ -303,12 +292,10 @@ describe('published test keys (SDK test vectors)', () => {
 
     it('refuse both test keys unconditionally (any encoding, or as a KeyObject), like an invalid key', () => {
       for (const testKey of TEST_KEYS) {
-        // The same key imported through the internal path: handing over a KeyObject does not get around the check.
         const keyObject = parsePublicKeyAllowingTestKeys(testKey);
         for (const key of [...encodings(testKey), keyObject]) {
           const label = typeof key === 'string' ? JSON.stringify(key) : 'KeyObject';
           if (typeof key === 'string') expectRefused(() => parsePublicKey(key), `parsePublicKey ${label}`);
-          // Refused before anything is verified: even an authentic vector signed with that key is never returned.
           expectRefused(() => verifyEnvelope(key, envelopeVector.envelope, envelopeExpectations), `verifyEnvelope ${label}`);
           expectRefused(() => verifyLease(key, leaseVector.token, leaseExpectations), `verifyLease ${label}`);
         }
@@ -350,7 +337,6 @@ describe('published test keys (SDK test vectors)', () => {
       const leaseCheck = { productId: PRODUCT_ID, hwid: TEST_HWID, now: T0 + 60 };
       expect(verifyLease(publicKey, lease, leaseCheck).status).toBe('valid');
       expect(verifyLease(parsePublicKey(publicKey), lease, leaseCheck).status).toBe('valid');
-      // An answer carrying a lease: verifyEnvelope's device-binding check verifies that lease with the same key.
       const nonce = 'n'.repeat(43);
       const request = {
         method: 'POST',
@@ -364,7 +350,6 @@ describe('published test keys (SDK test vectors)', () => {
       expect(verifyEnvelope(publicKey, envelope, { ...expectations, hwid: 'another-device-hwid' }).status).toBe(
         'hwid_mismatch',
       );
-      // Nothing signed with a published test key passes for a product key.
       expect(verifyEnvelope(publicKey, signEnvelope(payloadFor(request)), expectations).status).toBe('invalid_signature');
     });
 
@@ -377,7 +362,6 @@ describe('published test keys (SDK test vectors)', () => {
         expect(verifyEnvelopeAllowingTestKeys(key, envelopeVector.envelope, envelopeExpectations).status).toBe('valid');
         expect(verifyLeaseAllowingTestKeys(key, leaseVector.token, leaseExpectations).status).toBe('valid');
       }
-      // The device-binding check inside the envelope verification runs on the internal lease path too.
       const otherDevice = vectors.envelopes.find((v) => v.name === 'validate_lease_other_device')!;
       const bound = verifyEnvelopeAllowingTestKeys(vectors.keys.publicKey, otherDevice.envelope, {
         nonce: otherDevice.requestNonce,
@@ -386,7 +370,6 @@ describe('published test keys (SDK test vectors)', () => {
         hwid: otherDevice.hwid,
       });
       expect(bound.status).toBe('hwid_mismatch');
-      // The second test key verifies what it signed (the wrong_key vector) through the internal path as well.
       const wrongKey = vectors.envelopes.find((v) => v.name === 'wrong_key')!;
       const signedByWrongKey = verifyEnvelopeAllowingTestKeys(vectors.keys.wrongPublicKey, wrongKey.envelope, {
         nonce: wrongKey.requestNonce,
@@ -557,7 +540,6 @@ describe('validate', () => {
     expect(Math.abs((second!.body.timestamp as number) - realNow())).toBeLessThanOrEqual(5);
     expect(Math.abs(client.clockOffset - 3600)).toBeLessThanOrEqual(5);
 
-    // The learned offset is reused: the next request is accepted first time.
     await client.validate(LICENSE_KEY);
     expect(server.requests).toHaveLength(3);
   });
@@ -730,7 +712,6 @@ describe('unsigned HTTP errors', () => {
   it('maps gateway errors without a Velsigil body to network_error', async () => {
     server.handler = () => ({ kind: 'raw', status: 502, body: '<html>Bad gateway</html>', headers: { 'content-type': 'text/html' } });
     expect((await makeClient().validate(LICENSE_KEY)).code).toBe('network_error');
-    // A proxy's own JSON error page is not a Velsigil error body either.
     server.handler = () => ({ kind: 'json', status: 503, body: { message: 'Service Unavailable' } });
     expect((await makeClient().validate(LICENSE_KEY)).code).toBe('network_error');
     server.handler = () => ({ kind: 'raw', status: 504, body: '' });
@@ -812,7 +793,6 @@ describe('offline leases', () => {
     expect(online.lease?.expiresAt).toBe(T0 + 3600);
     expect(store.load(PRODUCT_ID)?.lease?.expiresAt).toBe(T0 + 3600);
 
-    // Server unreachable: the stored lease keeps the app working until it expires.
     server.handler = () => ({ kind: 'destroy' });
     nowMs = (T0 + 1800) * 1000;
     const offline = await client.validateWithOfflineFallback(LICENSE_KEY);
@@ -860,9 +840,7 @@ describe('offline leases', () => {
     server.handler = leaseHandler(T0 + 3600);
     await client.validate(LICENSE_KEY);
     server.handler = () => ({ kind: 'json', status: 500, body: { error: { code: 'internal_error' } } });
-    // validate() still reports the real error ...
     expect((await client.validate(LICENSE_KEY)).code).toBe('internal_error');
-    // ... while the fallback keeps the app working on the stored lease.
     const result = await client.validateWithOfflineFallback(LICENSE_KEY);
     expect(result).toMatchObject({ ok: true, code: 'ok', offline: true });
   });
@@ -879,8 +857,7 @@ describe('offline leases', () => {
   });
 
   it('rejects a signed success whose lease belongs to another device and keeps the local state', async () => {
-    // A license-sharing proxy rewrites hwid + deviceSecret to those of one real activation: the
-    // server's signed answer (lease) then describes that device, not this one.
+    // Simulates a license-sharing proxy: the signed lease belongs to another device.
     const store = new MemoryStore();
     const ownLease = makeLease({ iat: T0, exp: T0 + 3600 });
     store.save(PRODUCT_ID, { deviceSecret: SECRET_1, lease: { token: ownLease, expiresAt: T0 + 3600 } });
@@ -896,9 +873,7 @@ describe('offline leases', () => {
     expect(result).toMatchObject({ ok: false, code: 'invalid_response', license: null, lease: null });
     expect(result.message).toContain('different device');
     expect(result.hasFeature('pro')).toBe(false);
-    // Nothing from the foreign response is used: no secret, no lease, the own lease survives.
     expect(store.load(PRODUCT_ID)).toEqual({ deviceSecret: SECRET_1, lease: { token: ownLease, expiresAt: T0 + 3600 } });
-    // invalid_response never triggers the offline fallback.
     expect((await client.validateWithOfflineFallback(LICENSE_KEY)).code).toBe('invalid_response');
   });
 
@@ -1028,7 +1003,6 @@ describe('offline leases', () => {
       'activation_rate_limited',
       'activations_disabled',
       'replay_detected',
-      // Free trials (SPEC 9.7): another key's trial refused on this device says nothing about the stored license.
       'trial_already_used',
     ]) {
       server.handler = (request) => ({
@@ -1072,10 +1046,6 @@ describe('offline leases', () => {
   });
 });
 
-// The license server is unavailable while something still answers HTTP: the Velsigil app is up but its database is
-// down (500 internal_error, 503 service_busy, or an empty 503 with Retry-After), or the app is down behind IIS ARR /
-// Caddy (502/503/504, often an HTML page). validateWithOfflineFallback treats every unsigned 5xx like a failed
-// connection; signed answers, 4xx, redirects and invalid_response stay final.
 describe('offline fallback when the server is unavailable (unsigned 5xx)', () => {
   const LEASE_EXP = T0 + 3600;
   const LEASE_LICENSE_ID = '5d2c8e4a-3f1b-4c6d-9e8f-0a1b2c3d4e5f';
@@ -1084,14 +1054,13 @@ describe('offline fallback when the server is unavailable (unsigned 5xx)', () =>
     return makeLease({ iat: T0, exp: LEASE_EXP, licenseExpiresAt: T0 + 30 * 86_400 }, key);
   }
 
-  /** A client at `nowS` whose store holds this device's secret and `lease` (nothing when null). */
   function clientWithLease(lease: string | null, nowS = T0 + 600): { client: VelsigilClient; store: MemoryStore } {
     const store = new MemoryStore();
     if (lease !== null) store.save(PRODUCT_ID, { deviceSecret: SECRET_1, lease: { token: lease, expiresAt: LEASE_EXP } });
     return { store, client: makeClient({ store, clock: () => nowS * 1000 }) };
   }
 
-  /** [description, reply, the code plain validate() reports for it (unchanged)]. */
+  /** [description, reply, code that plain validate() reports]. */
   const unavailable: Array<[string, MockReply, string]> = [
     [
       '500 with a Velsigil internal_error body',
@@ -1153,7 +1122,6 @@ describe('offline fallback when the server is unavailable (unsigned 5xx)', () =>
         const { client, store } = clientWithLease(validLease());
         const result = await client.validate(LICENSE_KEY);
         expect(result).toMatchObject({ ok: false, code: reported, offline: false, license: null });
-        // An unsigned error keeps the stored lease.
         expect(store.load(PRODUCT_ID)?.lease?.expiresAt).toBe(LEASE_EXP);
       });
 
@@ -1164,7 +1132,7 @@ describe('offline fallback when the server is unavailable (unsigned 5xx)', () =>
         expect(result.license?.id).toBe(LEASE_LICENSE_ID);
         expect(result.hasFeature('pro')).toBe(true);
         expect(result.lease?.expiresAt).toBe(LEASE_EXP);
-        expect(server.requests).toHaveLength(1); // no retry
+        expect(server.requests).toHaveLength(1);
         expect(store.load(PRODUCT_ID)).toMatchObject({ deviceSecret: SECRET_1, lease: { expiresAt: LEASE_EXP } });
       });
 
@@ -1226,7 +1194,6 @@ describe('offline fallback when the server is unavailable (unsigned 5xx)', () =>
     });
     const refused = makeClient({ store: storeWithLease(), clock }, `http://127.0.0.1:${await closedPort()}`);
     expect(await refused.validateWithOfflineFallback(LICENSE_KEY)).toMatchObject({ ok: true, offline: true });
-    // Nothing stored: the original transport failure.
     const bare = makeClient({ clock }, `http://127.0.0.1:${await closedPort()}`);
     expect(await bare.validateWithOfflineFallback(LICENSE_KEY)).toMatchObject({ ok: false, code: 'network_error', offline: false });
   });
@@ -1239,7 +1206,6 @@ describe('offline fallback when the server is unavailable (unsigned 5xx)', () =>
     expect(without).toMatchObject({ ok: false, code: 'internal_error', offline: false, license: null });
   });
 
-  // Final answers: never replaced by the lease, even though a valid one is stored.
   it('does not fall back on 429 rate_limited (keeps Retry-After)', async () => {
     server.handler = () => ({
       kind: 'json',
@@ -1264,7 +1230,7 @@ describe('offline fallback when the server is unavailable (unsigned 5xx)', () =>
       [{ kind: 'json', status: 404, body: { error: { code: 'unknown_product', message: 'Unknown' } } }, 'unknown_product'],
       [{ kind: 'json', status: 403, body: { error: { code: 'ip_blocked', message: 'Blocked' } } }, 'ip_blocked'],
       [{ kind: 'raw', status: 404, body: '<html>Not found</html>' }, 'invalid_response'],
-      // The decision is made on the HTTP status, never on the unsigned body's code.
+      // Decided by HTTP status, not by the unsigned body's code.
       [{ kind: 'json', status: 400, body: { error: { code: 'internal_error', message: 'x' } } }, 'internal_error'],
     ];
     for (const [reply, code] of replies) {
@@ -1301,9 +1267,6 @@ describe('offline fallback when the server is unavailable (unsigned 5xx)', () =>
   });
 });
 
-// 1.0.4: retryAfter comes from the Retry-After of every 429 and 503 answer, whatever code it maps to (CLIENT_PROTOCOL
-// 5.3: the server's empty 503 during a database outage carries Retry-After: 30), and the results of the offline
-// fallback carry the value of the failed online attempt (identical in every Velsigil SDK).
 describe('Retry-After on 429 and 503 answers', () => {
   const NOW_S = T0 + 600;
   const LEASE_EXP = T0 + 3600;
@@ -1424,13 +1387,10 @@ describe('Retry-After on 429 and 503 answers', () => {
       offline: true,
       retryAfter: 30,
     });
-    // Nothing stored: the online result itself, which already has it.
     expect(await fallback(storeWith(null))).toMatchObject({ code: 'network_error', offline: false, retryAfter: 30 });
-    // A direct offline check made no online attempt.
     const direct = await makeClient({ store, clock: () => NOW_S * 1000 }).validateOffline();
     expect(direct).toMatchObject({ ok: true, offline: true, retryAfter: null });
 
-    // The value of the answer that failed: 5 s for service_busy, none for a 500 or a dropped connection.
     server.handler = () => ({
       kind: 'json',
       status: 503,
@@ -1445,11 +1405,10 @@ describe('Retry-After on 429 and 503 answers', () => {
   });
 });
 
-// Final sweep F-SDK-1: a store read that fails (a file lock, a locked keyring) is not "nothing stored".
 describe('store read failures', () => {
   const paidSecret = `dsk_${'P4idL1c3'.repeat(5)}abc`;
 
-  /** A MemoryStore whose loads throw EBUSY: the next `failures` ones, or every one when `failures` is -1. */
+  /** Loads throw EBUSY for the next `failures` calls, or always when it is -1. */
   class FlakyStore extends MemoryStore {
     failures: number;
     saves = 0;
@@ -1486,14 +1445,14 @@ describe('store read failures', () => {
     server.handler = (request) => okWithLease(request);
     const result = await makeClient({ store, clock: () => T0 * 1000, onStoreError: () => undefined }).validate(LICENSE_KEY);
     expect(result.ok).toBe(true);
-    expect(server.requests[0]!.body.deviceSecret).toBeUndefined(); // the read before the request failed
+    expect(server.requests[0]!.body.deviceSecret).toBeUndefined();
     expect(store.load(PRODUCT_ID)).toEqual({ deviceSecret: paidSecret, lease: { token: expect.any(String), expiresAt: T0 + 3600 } });
   });
 
   it('writes nothing while the store stays unreadable, except a newly issued device secret', async () => {
     const store = new FlakyStore(0);
     store.save(PRODUCT_ID, { deviceSecret: paidSecret, lease: null });
-    store.failures = -1; // every load fails from now on; saves still work
+    store.failures = -1;
     store.saves = 0;
     const errors: unknown[] = [];
     server.handler = (request) => okWithLease(request);
@@ -1504,7 +1463,6 @@ describe('store read failures', () => {
     store.failures = 0;
     expect(store.load(PRODUCT_ID)?.deviceSecret).toBe(paidSecret);
 
-    // A secret the server just issued belongs to a new activation: it is kept even though the store is unreadable.
     store.failures = -1;
     server.handler = (request) => okWithLease(request, SECRET_1);
     expect((await client.validate(LICENSE_KEY)).ok).toBe(true);
@@ -1522,7 +1480,6 @@ describe('store read failures', () => {
     expect(refused.message).toMatch(/could not be read/);
     expect(server.requests).toHaveLength(0);
     expect(SDK_CODES).toContain('store_unavailable');
-    // Once the store can be read again the guard sees the paid license.
     expect((await client.startTrial()).code).toBe('already_licensed');
     expect(server.requests).toHaveLength(0);
     expect(store.load(PRODUCT_ID)?.deviceSecret).toBe(paidSecret);
@@ -1592,7 +1549,6 @@ describe('free trials (SPEC 9.7)', () => {
     expect(withTrialRef('mailto:sales@example.com', REF)).toBe('mailto:sales@example.com');
     expect(TRIAL_REF_PARAM).toBe('velsigil_trial');
 
-    // The offline lease carries none.
     server.handler = () => ({ kind: 'destroy' });
     nowMs = (T0 + 60) * 1000;
     const offline = await client.validateWithOfflineFallback(LICENSE_KEY);
@@ -1600,7 +1556,6 @@ describe('free trials (SPEC 9.7)', () => {
     expect(offline.trialRef).toBeNull();
     expect(offline.withTrialRef('https://shop.example.com/buy')).toBe('https://shop.example.com/buy');
 
-    // An expired trial: a denial that still carries the reference (the moment to offer "Buy now").
     const plain = makeClient({ clock: () => T0 * 1000 });
     server.handler = (request) => {
       const payload = payloadFor(request, { ok: false, code: 'license_expired', message: 'This license has expired.', activation: null, lease: null });
@@ -1609,10 +1564,8 @@ describe('free trials (SPEC 9.7)', () => {
     const expired = await plain.validate(LICENSE_KEY);
     expect([expired.ok, expired.code, expired.trialRef]).toEqual([false, 'license_expired', REF]);
 
-    // Absent (paid licenses, older servers): null.
     server.handler = (request) => ({ kind: 'signed', payload: payloadFor(request) });
     expect((await plain.validate(LICENSE_KEY)).trialRef).toBeNull();
-    // Malformed: the answer is refused.
     for (const bad of [42, '', 'has space', 'x'.repeat(201), 'ünïcode']) {
       server.handler = (request) => {
         const payload = payloadFor(request);
@@ -1646,7 +1599,6 @@ describe('in-app free trials: startTrial (SPEC 9.7)', () => {
   const TRIAL_KEY = 'DEMO-7K3QM-P9XWD-R4TNB-H2CFY-M8LJV';
   const hwidHash = createHash('sha256').update(TEST_HWID, 'utf8').digest('hex');
 
-  /** A signed trial start for `request`: the trial license, a new device secret, the trial lease and the key. */
   function startedPayload(request: Parameters<typeof payloadFor>[0], overrides: Record<string, unknown> = {}): Record<string, unknown> {
     const base = payloadFor(request, {
       message: 'Your free trial has started.',
@@ -1677,9 +1629,7 @@ describe('in-app free trials: startTrial (SPEC 9.7)', () => {
       timestamp: expect.any(Number),
     });
     expect(store.load(PRODUCT_ID)).toEqual({ deviceSecret: SECRET_1, lease: { token: expect.any(String), expiresAt: T0 + 3600 } });
-    // The key is never stored by the SDK.
     expect(JSON.stringify(store.load(PRODUCT_ID))).not.toContain(TRIAL_KEY);
-    // Offline works from the trial lease; the next validate (with the key the app stored) sends the device secret.
     server.handler = () => ({ kind: 'destroy' });
     nowMs = (T0 + 60) * 1000;
     const offline = await makeClient({ store, clock: () => nowMs }).validateOffline();
@@ -1691,7 +1641,6 @@ describe('in-app free trials: startTrial (SPEC 9.7)', () => {
     expect(server.requests.at(-1)!.body.deviceSecret).toBe(SECRET_1);
   });
 
-  // Review finding 7: a trial answer would overwrite the device secret and lease of the license this device holds.
   const paidSecret = `dsk_${'P4idL1c3'.repeat(5)}abc`;
   const paidLease = { token: makeLease({ iat: T0, exp: T0 + 7200, licenseExpiresAt: T0 + 365 * 86_400 }), expiresAt: T0 + 7200 };
   it.each([
@@ -1699,7 +1648,6 @@ describe('in-app free trials: startTrial (SPEC 9.7)', () => {
     { name: 'a lease', state: { deviceSecret: null, lease: paidLease } },
     { name: 'a device secret and a lease', state: { deviceSecret: paidSecret, lease: paidLease } },
   ])('refuses locally with already_licensed when the store holds $name: nothing sent, nothing changed', async ({ state }) => {
-    // If anything were sent, the server would start a trial whose secret and lease replace the stored ones.
     server.handler = (request) => ({ kind: 'signed', payload: startedPayload(request) });
     const store = new MemoryStore();
     store.save(PRODUCT_ID, state);
@@ -1716,9 +1664,8 @@ describe('in-app free trials: startTrial (SPEC 9.7)', () => {
     expect(SDK_CODES).toContain('already_licensed');
   });
 
-  // Final sweep F-SDK-4: one "days left" rule in every SDK (CLIENT_PROTOCOL 5.2), N right after an N-day trial starts.
   it('reports the full trial length as days left right after the start, online and offline', async () => {
-    const clockMs = (T0 + 1) * 1000; // the local clock is a second past the signed serverTime
+    const clockMs = (T0 + 1) * 1000; // one second past the signed serverTime
     const store = new MemoryStore();
     server.handler = (request) => {
       const started = startedPayload(request);
@@ -1776,7 +1723,6 @@ describe('in-app free trials: startTrial (SPEC 9.7)', () => {
     expect(old.code).toBe('panel_too_old');
     expect(old.message).toMatch(/update the Velsigil panel/);
     expect(old.requestId).toBe('req-old');
-    // Only the trial endpoint maps a 404 like this.
     expect((await makeClient().validate(LICENSE_KEY)).code).toBe('invalid_response');
     server.handler = () => ({ kind: 'json', status: 404, body: { error: { code: 'unknown_product', message: 'Unknown product.' } } });
     expect((await makeClient().startTrial()).code).toBe('unknown_product');
@@ -1908,7 +1854,6 @@ describe('device binding of signed responses (activation.hwidHash)', () => {
       const result = await call();
       expect(result).toMatchObject({ ok: false, code: 'invalid_response', activation: null, download: null });
       expect(result.message).toContain('different device');
-      // No foreign secret persisted, own lease kept, and a "successful" deactivate clears nothing.
       expect(store.load(PRODUCT_ID)).toEqual(initial);
     }
     expect((await client.validateOffline()).ok).toBe(true);
@@ -1931,7 +1876,6 @@ describe('device binding of signed responses (activation.hwidHash)', () => {
     });
     const result = await makeClient({ store, clock: () => T0 * 1000 }).validate(LICENSE_KEY);
     expect(result.code).toBe('invalid_response');
-    // The denial was about another device: the lease of this one is not revoked by it.
     expect(store.load(PRODUCT_ID)?.lease).not.toBeNull();
   });
 });
@@ -1967,7 +1911,6 @@ describe('updates and downloads', () => {
   });
 
   it('checkUpdate reports no_release (ok, no update) when nothing is published', async () => {
-    // Exactly what the server sends (SPEC 10.2).
     server.handler = (request) => ({
       kind: 'signed',
       payload: payloadFor(request, { ok: true, code: 'no_release', message: 'No release has been published yet.', license: null, activation: null, update: null }),

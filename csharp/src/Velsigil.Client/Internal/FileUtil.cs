@@ -9,11 +9,7 @@ internal static class FileUtil
 {
     private const int ReplaceAttempts = 5;
 
-    /// <summary>
-    /// Atomically moves <paramref name="source"/> over <paramref name="destination"/> (same directory),
-    /// retrying briefly on the transient sharing violations Windows reports while a scanner or indexer
-    /// holds the target.
-    /// </summary>
+    /// <summary>Atomic replace, retrying briefly on transient Windows sharing violations.</summary>
     public static void ReplaceFile(string source, string destination)
     {
         for (var attempt = 1; ; attempt++)

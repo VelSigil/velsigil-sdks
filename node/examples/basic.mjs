@@ -1,35 +1,19 @@
 #!/usr/bin/env node
-// Velsigil Node.js SDK - runnable example: validate a license (with offline fallback), gate a feature, check for
-// updates and optionally download + verify a release.
-//
-// 1. Set API_URL, PRODUCT_ID and PUBLIC_KEY below to your product's values.
-// 2. Build the SDK (in the SDK's node folder):   npm ci --ignore-scripts && npm run build
-// 3. Run (PowerShell):   $env:VELSIGIL_LICENSE_KEY = "<license key>"; node examples/basic.mjs
-//    or (bash):          VELSIGIL_LICENSE_KEY=<license key> node examples/basic.mjs
-//
-// Optional: VELSIGIL_DOWNLOAD_DIR=<dir> (also download and verify the latest release).
-// Until the three values are set (they are placeholders), it prints a usage message and exits with code 2.
-// Never print or log the license key.
+// Example: validate a license, gate a feature, check for updates and optionally download a release.
+// Run: VELSIGIL_LICENSE_KEY=<license key> node examples/basic.mjs (set VELSIGIL_DOWNLOAD_DIR to download).
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { defaultStoreDirectory, FileStore, VelsigilClient, VelsigilError } from 'velsigil-client';
 
-// Replace these with the values from your product's "Integration" tab in the Velsigil panel (Products > your
-// product > Integration). Keep them in your code: the public key is the trust anchor that makes forged server
-// answers detectable, so never load it (or the API URL / product id) from a file, environment variable or
-// setting the user can change - otherwise anyone can point the app at their own key and a fake server.
-const API_URL = '<your Velsigil server URL>'; // e.g. 'https://licenses.example.com'
-const PRODUCT_ID = '<your product id>'; // the product UUID
-const PUBLIC_KEY = "<your product's public key>"; // standard base64 of the 32-byte Ed25519 key
+// Values from Products > your product > Integration. Hard-code them: never load them from user-editable config.
+const API_URL = '<your Velsigil server URL>';
+const PRODUCT_ID = '<your product id>';
+const PUBLIC_KEY = "<your product's public key>";
 
 const APP_NAME = 'VelsigilExample';
 const APP_VERSION = '1.0.0';
 
-// Local testing ONLY (delete this in a real application): VELSIGIL_API_URL, VELSIGIL_PRODUCT_ID and
-// VELSIGIL_PUBLIC_KEY may replace the three values above, but only when the API URL in use is a loopback URL
-// (localhost, 127.0.0.1 or [::1]), e.g. a local panel or the SDK's mock server. Any other API URL makes the
-// example refuse them, so they can never redirect it to a remote server. The SDK itself accepts the published
-// public test key of the SDK test vectors only for such loopback URLs.
+// Local testing only: env overrides are accepted for a loopback API URL. Remove this in a real app.
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const isLoopbackUrl = (value) => {
   try {
@@ -73,7 +57,6 @@ const downloadDir = env.VELSIGIL_DOWNLOAD_DIR;
 let client;
 try {
   client = new VelsigilClient(config.API_URL, config.PRODUCT_ID, config.PUBLIC_KEY, {
-    // Persist the device secret and offline lease per OS user.
     store: new FileStore(defaultStoreDirectory(APP_NAME)),
     onStoreError: () => console.warn('Warning: could not persist license state; continuing in memory.'),
   });
@@ -85,18 +68,16 @@ try {
   throw error;
 }
 
-// Online validation; falls back to the stored offline lease ONLY if the server is unavailable
-// (no HTTP response, or an unsigned HTTP 5xx such as a database outage or a gateway's 502/503/504).
+// Uses the offline lease only when the server is unreachable or answers an unsigned 5xx.
 const result = await client.validateWithOfflineFallback(licenseKey, {
   version: APP_VERSION,
   deviceName: hostname(),
 });
 
-// Never print the license key or device secret. Codes and request ids are safe to show.
+// Never print the license key or device secret.
 if (!result.ok) {
   console.error(`License check failed: ${result.code} - ${result.message}`);
   if (result.requestId) console.error(`Request id (for support): ${result.requestId}`);
-  // The server's Retry-After (any 429 or 503; also on an offline fallback result): when to try online again.
   if (result.retryAfter !== null) console.error(`Retry in ${result.retryAfter} s.`);
   process.exit(1);
 }
@@ -112,7 +93,6 @@ if (result.isLifetime) {
 }
 if (result.leaseExpiresAt) console.log(`  offline until: ${result.leaseExpiresAt.toISOString()}`);
 
-// Gate features on the verified result, at the place where the feature is used.
 if (result.hasFeature('pro')) console.log('  -> Pro features enabled');
 
 if (!result.offline) {
@@ -124,7 +104,7 @@ if (!result.offline) {
     if (downloadDir) {
       const link = await client.getDownload(licenseKey, info.latestVersion);
       if (link.ok && link.download) {
-        // Never trust a file name as a path: accept a plain, safe base name only.
+        // Never use the server's file name as a path.
         const name = link.download.fileName;
         const safeName = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(name) ? name : 'release.bin';
         const destination = join(downloadDir, safeName);

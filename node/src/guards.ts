@@ -1,5 +1,3 @@
-/** Small structural validators for decoded JSON. They never trust the input's prototype. */
-
 export type JsonObject = Record<string, unknown>;
 
 export function isObject(value: unknown): value is JsonObject {
@@ -14,7 +12,6 @@ export function isNonEmptyString(value: unknown, maxLength = 4096): value is str
   return isString(value, maxLength) && value.length > 0;
 }
 
-/** Unix seconds (or another non-negative integer quantity). */
 export function isUnixTime(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
@@ -35,7 +32,6 @@ export function isOneOf<T extends string>(value: unknown, allowed: readonly T[])
   return typeof value === 'string' && (allowed as readonly string[]).includes(value);
 }
 
-/** Server result codes are short snake_case identifiers. */
 export function isCode(value: unknown): value is string {
   return typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value);
 }
@@ -44,7 +40,6 @@ export function isHex64(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-fA-F]{64}$/.test(value);
 }
 
-/** UUIDs are compared case-insensitively. */
 export function sameId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }

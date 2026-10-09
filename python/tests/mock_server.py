@@ -1,8 +1,4 @@
-"""Local mock of the Velsigil client API that signs responses like the server.
-
-Uses ``http.server.ThreadingHTTPServer`` on an ephemeral 127.0.0.1 port and
-``cryptography``'s Ed25519 with the fixed seed from ``test-vectors.json``.
-"""
+"""Local mock of the Velsigil client API that signs responses like the server."""
 
 from __future__ import annotations
 
@@ -60,7 +56,7 @@ def public_key_b64(seed_b64: str = SEED) -> str:
 
 
 def generate_public_key_b64() -> str:
-    """A freshly generated Ed25519 public key (standard base64): a "real" product key, not a vector key."""
+    """A random product key, for URLs where the vector keys are refused."""
     raw = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     return base64.b64encode(raw).decode("ascii")
 
@@ -97,7 +93,7 @@ def make_lease(
         "iat": iat if iat is not None else exp - 86400,
         "exp": exp,
     }
-    if trial is not None:  # free-trial lease (SPEC 9.7): the optional signed field
+    if trial is not None:
         claims["trial"] = trial
     body = encode_payload(claims)
     return body + "." + sign_text(body, seed_b64)

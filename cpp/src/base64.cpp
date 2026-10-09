@@ -1,5 +1,4 @@
-// Base64 helpers (RFC 4648). The URL-safe variant is used for envelopes, signatures, leases and
-// nonces; the standard variant only for the product public key.
+// Base64 helpers: URL-safe for envelopes, signatures and leases; standard for the public key.
 #include "detail.hpp"
 
 namespace velsigil::detail {
@@ -22,7 +21,7 @@ int decode_symbol(char c, bool url_safe) noexcept {
 }
 
 std::optional<Bytes> decode(std::string_view input, bool url_safe) {
-  // Optional trailing padding: at most two '=' and, when present, it must complete a 4-char quantum.
+  // At most two '=' and, when present, they must complete a 4-char quantum.
   std::size_t length = input.size();
   std::size_t padding = 0;
   while (length > 0 && padding < 2 && input[length - 1] == '=') {

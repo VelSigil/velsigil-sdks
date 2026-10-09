@@ -46,10 +46,7 @@ internal sealed class MockRequest
     public string? Field(string field) => Json != null && Json.TryGetPropertyValue(field, out var node) ? node?.GetValue<string>() : null;
 }
 
-/// <summary>
-/// In-process stand-in for the Velsigil server: an <see cref="HttpMessageHandler"/> that records every
-/// request and answers through a test-supplied handler (usually returning signed envelopes).
-/// </summary>
+/// <summary>In-process stand-in for the server: records requests and answers through a test handler.</summary>
 internal sealed class MockServer : HttpMessageHandler
 {
     private readonly List<MockRequest> _requests = new List<MockRequest>();
@@ -122,7 +119,7 @@ internal static class Responses
         }.ToJsonString(), headers);
 }
 
-/// <summary>Builders for signed payload objects (SPEC 10.1).</summary>
+/// <summary>Builders for signed payload objects.</summary>
 internal static class Payloads
 {
     public const long ServerTime = 1767225600;

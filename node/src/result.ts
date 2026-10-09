@@ -2,10 +2,7 @@ import type { VelsigilCode } from './codes.js';
 import { withTrialRef } from './trial-ref.js';
 import type { ActivationStatus, LicenseStatus, ProtocolDownload, ProtocolUpdate, RequestType } from './types.js';
 
-/**
- * License details. Times are unix seconds. When the result comes from an offline lease,
- * `maxDevices`, `devicesUsed` and `createdAt` are unknown and therefore `null`.
- */
+/** License details in unix seconds; device counts and `createdAt` are null on offline results. */
 export interface LicenseInfo {
   readonly id: string;
   readonly plan: string;
@@ -15,22 +12,13 @@ export interface LicenseInfo {
   readonly maxDevices: number | null;
   readonly devicesUsed: number | null;
   readonly createdAt: number | null;
-  /**
-   * True for a free-trial license (SPEC 9.7: the signed `trial` field, also in offline leases). The SDK always sets it;
-   * optional only so that objects built by older code still type-check.
-   */
+  /** True for a free-trial license. */
   readonly isTrial?: boolean;
-  /**
-   * The trial's conversion reference (SPEC 9.7): set for a free trial a purchase can still convert (servers since
-   * 2026-10-06), null otherwise and for offline results. See {@link VelsigilResult.trialRef}.
-   */
+  /** See {@link VelsigilResult.trialRef}. */
   readonly trialRef?: string | null;
 }
 
-/**
- * The server-side device record. The device secret itself is never exposed on results (it is
- * persisted by the SDK); `deviceSecretIssued` tells whether this response issued a new one.
- */
+/** The server-side device record; the device secret itself is never exposed. */
 export interface ActivationInfo {
   readonly id: string;
   readonly status: ActivationStatus;
@@ -44,6 +32,7 @@ export interface LeaseInfo {
   readonly expiresAt: number;
 }
 
+/** Update check details. */
 export type UpdateInfo = Readonly<ProtocolUpdate>;
 
 /** A short-lived download link. `url` is absolute. */
@@ -64,53 +53,35 @@ export interface ResultInit {
   offline?: boolean;
   retryAfter?: number | null;
   trialKey?: string | null;
-  /**
-   * Unix seconds the result refers to when it has no `serverTime` (offline results: the time of the check, local clock
-   * plus the learned server offset). The default `now` of {@link VelsigilResult.daysRemaining}; null = the local clock.
-   */
+  /** Time of an offline check, used by `daysRemaining` when there is no `serverTime`. */
   referenceTime?: number | null;
 }
 
 const DAY_SECONDS = 86_400;
 
-/**
- * Immutable outcome of an SDK call. Business failures, network errors and invalid responses are
- * all represented here with `ok === false`; only configuration mistakes throw.
- */
+/** Immutable outcome of an SDK call; failures have `ok === false` and only configuration mistakes throw. */
 export class VelsigilResult {
-  /** True only for a verified, signed success (or a valid offline lease). */
+  /** True only for a verified, signed success or a valid offline lease. */
   readonly ok: boolean;
-  /** Server code (e.g. `ok`, `license_expired`) or SDK code (`network_error`, `invalid_response`, ...). */
+  /** Server code (e.g. `license_expired`) or SDK code (e.g. `network_error`). */
   readonly code: VelsigilCode;
-  /** Human readable message (server text for signed responses, SDK text otherwise). */
   readonly message: string;
-  /** Which request produced this result (`null` for locally generated results without a request). */
+  /** The request that produced this result, or null for local results. */
   readonly type: RequestType | null;
   readonly license: LicenseInfo | null;
   readonly activation: ActivationInfo | null;
   readonly lease: LeaseInfo | null;
   readonly update: UpdateInfo | null;
   readonly download: DownloadInfo | null;
-  /** Server request id (signed payload, or best effort for unsigned errors). Quote it to support. */
+  /** Server request id; quote it to support. */
   readonly requestId: string | null;
-  /** Authoritative server time (unix seconds) from a signed response. */
+  /** Server time (unix seconds) from a signed response. */
   readonly serverTime: number | null;
-  /** True when the result was produced from a stored offline lease without contacting the server. */
+  /** True when the result came from the stored offline lease. */
   readonly offline: boolean;
-  /**
-   * Seconds the server asked to wait before trying again (0..86400, a longer wait reads as one day): the `Retry-After`
-   * header (delta-seconds or HTTP date) of every HTTP 429 or 503 answer, whatever code it maps to (`rate_limited`;
-   * `network_error` for the empty 503 of a server whose database is unreachable, or a gateway's 503; `internal_error`
-   * for 503 `service_busy`). The results of the offline fallback of {@link VelsigilClient.validateWithOfflineFallback} (offline `ok`, `lease_expired`,
-   * `lease_invalid`) carry the value of the failed online attempt, so the app knows when to try online again. Null
-   * when the header is absent or unparseable, for every other status and for {@link VelsigilClient.validateOffline}.
-   */
+  /** Seconds from the server's `Retry-After` on a 429 or 503 (capped at one day), else null. */
   readonly retryAfter: number | null;
-  /**
-   * The license key of the free trial that {@link VelsigilClient.startTrial} just started (`ok` results only; null
-   * otherwise). The server sends it exactly once and cannot send it again: store it right away, like a key the user
-   * typed, and use it for every later `validate`. The SDK never persists it.
-   */
+  /** Key of the trial `startTrial` just started. The server sends it only once; store it. */
   readonly trialKey: string | null;
   readonly #referenceTime: number | null;
 
@@ -133,39 +104,28 @@ export class VelsigilResult {
     Object.freeze(this);
   }
 
-  /** True when the result is ok AND the license grants `feature`. Always false for failures. */
+  /** True when the result is ok and the license grants `feature`. */
   hasFeature(feature: string): boolean {
     return this.ok && this.license !== null && this.license.features.includes(feature);
   }
 
-  /** License expiry as a Date, or null for lifetime licenses / results without a license. */
+  /** License expiry, or null for lifetime licenses and results without a license. */
   get expiresAt(): Date | null {
     const at = this.license?.expiresAt;
     return at === null || at === undefined ? null : new Date(at * 1000);
   }
 
-  /**
-   * True when the license is a free trial (SPEC 9.7). Use it for "Trial: N days left" / "Buy now" UI; the license
-   * stays the same after a purchase, and this turns false with the next online validation.
-   */
+  /** True for a free trial; turns false on the next online validation after a purchase. */
   get isTrial(): boolean {
     return this.license?.isTrial === true;
   }
 
-  /**
-   * The current trial's conversion reference (SPEC 9.7), or null: present on online results for a free trial a purchase
-   * can still convert, also on `license_expired` (the moment to offer "Buy now"). Add it to the "Buy now" link with
-   * {@link withTrialRef}: the purchase then converts THIS trial into the paid license (same key) whatever e-mail address
-   * the buyer pays with. Opaque; a fresh one comes with every answer; offline results have none.
-   */
+  /** The trial's conversion reference for the "Buy now" link, or null (always null offline). */
   get trialRef(): string | null {
     return this.license?.trialRef ?? null;
   }
 
-  /**
-   * `buyUrl` with this trial's conversion reference (`velsigil_trial=<ref>`; Stripe Payment Links: `client_reference_id`),
-   * or `buyUrl` unchanged when there is none (a paid license, an offline result, an older server).
-   */
+  /** `buyUrl` with this trial's conversion reference, or unchanged when there is none. */
   withTrialRef(buyUrl: string): string {
     return withTrialRef(buyUrl, this.trialRef);
   }
@@ -180,29 +140,19 @@ export class VelsigilResult {
     return this.lease === null ? null : new Date(this.lease.expiresAt * 1000);
   }
 
-  /**
-   * Whole seconds until the license expires (0 when already past), or null for lifetime licenses
-   * and results without a license. `nowMs` defaults to the local clock.
-   */
+  /** Seconds until the license expires (0 when past), or null without an expiry. */
   secondsRemaining(nowMs: number = Date.now()): number | null {
     const at = this.license?.expiresAt;
     if (at === null || at === undefined) return null;
     return Math.max(0, at - Math.floor(nowMs / 1000));
   }
 
-  /**
-   * Days until the license expires, rounded UP (the "days left" rule of CLIENT_PROTOCOL 5.2, the same in every Velsigil
-   * SDK), or null for lifetime licenses and results without a license. Without `nowMs` it measures at the result's own
-   * time: the signed `serverTime` of an online answer, the time of the check for an offline result (local clock plus
-   * the learned server offset). So right after `startTrial` of an N-day trial it is N; it is 1 throughout the last day
-   * and 0 once expired.
-   */
+  /** Days until expiry, rounded up, measured at the result's own time by default; null without an expiry. */
   daysRemaining(nowMs?: number): number | null {
     const seconds = this.secondsRemaining(nowMs ?? this.#referenceMs());
     return seconds === null ? null : Math.ceil(seconds / DAY_SECONDS);
   }
 
-  /** The result's own time in milliseconds (see {@link daysRemaining}); the local clock when it has none. */
   #referenceMs(): number {
     const reference = this.serverTime ?? this.#referenceTime;
     return reference === null ? Date.now() : reference * 1000;

@@ -19,11 +19,7 @@ export interface StoredState {
   lease: StoredLease | null;
 }
 
-/**
- * Pluggable persistence for per-product client state (device secret + offline lease).
- * Methods may be synchronous or return promises. Implementations should store data so that only
- * the current OS user can read it.
- */
+/** Persistence for the device secret and offline lease; keep it readable by the current OS user only. */
 export interface VelsigilStore {
   load(productId: string): StoredState | null | Promise<StoredState | null>;
   save(productId: string, state: StoredState): void | Promise<void>;
@@ -34,7 +30,7 @@ export function emptyState(): StoredState {
   return { deviceSecret: null, lease: null };
 }
 
-/** Validates untrusted persisted data; invalid fields are dropped. */
+/** Drops invalid fields from untrusted persisted data. */
 export function sanitizeState(value: unknown): StoredState {
   if (!isObject(value)) return emptyState();
   const deviceSecret = isDeviceSecret(value.deviceSecret) ? value.deviceSecret : null;
@@ -73,30 +69,14 @@ export class MemoryStore implements VelsigilStore {
 
 const MAX_STATE_FILE_BYTES = 64 * 1024;
 const STORE_KEY_RE = /^[A-Za-z0-9-]{1,64}$/;
-// Starts and ends with a safe character (Windows strips trailing dots/spaces from directory names).
+// Windows strips trailing dots and spaces from directory names.
 const APP_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._ -]{0,62}[A-Za-z0-9_-])?$/;
-/** Last path segment of {@link defaultStoreDirectory}. */
 const STORE_DIR_NAME = 'velsigil';
-// Legacy names from before the product was renamed Veltrix -> Velsigil (file `veltrix-<id>.json`,
-// default directory `<app>/veltrix`). Only read as a fallback (and removed by `clear`) so an installed
-// app keeps its device secret and offline lease after updating the SDK; writes use the velsigil names.
+// Pre-rename (Veltrix) names, read as a fallback so existing installs keep their state.
 const LEGACY_FILE_PREFIX = 'veltrix-';
 const LEGACY_DIR_NAME = 'veltrix';
 
-/**
- * File-backed store: one JSON file per product (`velsigil-<productId>.json`) inside `directory`.
- *
- * - Writes are atomic: data goes to a fresh temporary file (created exclusively, mode 0600),
- *   is fsync'ed and then renamed over the target, so readers never observe partial files.
- * - The directory is created with mode 0700 and files with 0600 on POSIX systems. On Windows,
- *   protection comes from the per-user ACLs of the chosen directory (e.g. %LOCALAPPDATA%), see
- *   {@link defaultStoreDirectory}.
- * - Writes from one instance are serialized; across processes the last writer wins.
- * - Migration from SDK versions released under the former product name: when the state file does
- *   not exist, `load` reads `veltrix-<productId>.json` in the same directory or, for a directory
- *   named `velsigil` (see {@link defaultStoreDirectory}), in the sibling `veltrix` directory.
- *   The next `save` writes the new file; `clear` also removes the legacy file.
- */
+/** One JSON file per product, written atomically; files are 0600 on POSIX, per-user ACLs on Windows. */
 export class FileStore implements VelsigilStore {
   readonly directory: string;
   #queue: Promise<unknown> = Promise.resolve();
@@ -136,13 +116,12 @@ export class FileStore implements VelsigilStore {
 
   clear(productId: string): Promise<void> {
     const files = [this.filePath(productId), ...this.#legacyFilePaths(productId)];
-    // The legacy file must go too, otherwise `load` would fall back to it and resurrect the state.
+    // Remove the legacy file too, or `load` would fall back to it.
     return this.#enqueue(async () => {
       for (const file of files) await removeIfPresent(file);
     });
   }
 
-  /** Pre-rename locations of the state file for `productId`, in lookup order. */
   #legacyFilePaths(productId: string): string[] {
     const name = `${LEGACY_FILE_PREFIX}${productId.toLowerCase()}.json`;
     const paths = [join(this.directory, name)];
@@ -178,10 +157,7 @@ export class FileStore implements VelsigilStore {
   }
 }
 
-/**
- * Reads one state file: `undefined` when it does not exist, `null` when it is unusable (not a
- * regular file, oversized or not JSON), otherwise the sanitized state.
- */
+/** Undefined when the file is missing, null when it is unusable. */
 async function readStateFile(file: string): Promise<StoredState | null | undefined> {
   try {
     const info = await stat(file);
@@ -203,12 +179,7 @@ async function removeIfPresent(file: string): Promise<void> {
   }
 }
 
-/**
- * Recommended per-user directory for a {@link FileStore}:
- * - Windows: `%LOCALAPPDATA%\<appName>\velsigil` (per-user ACLs)
- * - macOS:   `~/Library/Application Support/<appName>/velsigil`
- * - Linux/other: `$XDG_DATA_HOME/<appName>/velsigil` or `~/.local/share/<appName>/velsigil`
- */
+/** Recommended per-user directory for a {@link FileStore}, e.g. `%LOCALAPPDATA%\<appName>\velsigil`. */
 export function defaultStoreDirectory(appName: string): string {
   if (typeof appName !== 'string' || !APP_NAME_RE.test(appName)) {
     throw new VelsigilError('invalid_argument', 'appName must be 1-64 characters of [A-Za-z0-9._ -]');

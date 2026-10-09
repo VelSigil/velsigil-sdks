@@ -124,8 +124,7 @@ public class DownloadTests
 
         var result = await client.GetDownloadAsync(Key);
 
-        // Like the other Velsigil SDKs: a grant that could never be fetched under the https policy is an
-        // invalid response, not a usable result.
+        // A grant that could never be fetched under the https policy is an invalid response.
         Assert.False(result.Ok);
         Assert.Equal(ResultCodes.InvalidResponse, result.Code);
         Assert.Null(result.Download);
@@ -164,7 +163,7 @@ public class DownloadTests
     [Fact]
     public async Task Download_redirect_followed_by_an_injected_http_client_is_rejected()
     {
-        // SDK-2: an injected HttpClient follows redirects by default; the file must not be accepted.
+        // An injected HttpClient follows redirects by default; the file must not be accepted.
         using var cdn = new LocalHttpServer(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(FileBytes) });
         using var panel = new LocalHttpServer(_ =>
         {
@@ -207,7 +206,7 @@ public class DownloadTests
     }
 
     [Theory]
-    [InlineData(503, "network_error", 5)]   // e.g. 503 service_busy with Retry-After: 5 (1.0.4: every 429 and 503)
+    [InlineData(503, "network_error", 5)]   // e.g. 503 service_busy with Retry-After: 5
     [InlineData(429, "rate_limited", 5)]
     [InlineData(502, "network_error", null)]
     [InlineData(500, "download_failed", null)]

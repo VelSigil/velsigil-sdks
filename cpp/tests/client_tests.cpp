@@ -1,10 +1,4 @@
-// Client behaviour tests. An in-process "server" (an injected ITransport) signs responses with a key
-// pair generated for this run (the published test-vector key is refused for the non-loopback kApiUrl),
-// and an injected clock makes time deterministic. Covers: ok, business failures, tampered/mismatched
-// responses, clock_skew + retry, device-secret persistence, unsigned HTTP errors (400/429/500/...),
-// transport failures, offline fallback, the HTTPS policy for download grants, configuration hardening
-// (including the refusal of the published test-vector keys outside loopback hosts), stores and
-// concurrent use. Exit code 0 = all checks passed.
+// Client behaviour tests against an in-process signing server and an injected clock.
 #include <velsigil/client.hpp>
 
 #include <nlohmann/json.hpp>
@@ -56,8 +50,6 @@ constexpr char kDeviceSecret[] = "dsk_Xq3vR9mT2pL8wN5kJ7hG4fD1sA6zC0bV9yU2iO3eW4
 constexpr char kUnicodeMessage[] = "Wartung \xE2\x80\x94 bitte sp\xC3\xA4ter erneut versuchen \xE2\x9C\x93";
 constexpr std::int64_t kStartTime = 1767225600;
 
-// ---- minimal test harness -----------------------------------------------------------------------
-
 int g_checks = 0;
 int g_failures = 0;
 
@@ -99,7 +91,6 @@ std::string b64url(std::string_view text) {
   return velsigil::detail::base64url_encode(reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
 }
 
-// Standard base64 with padding (the encoding of a product public key).
 std::string b64_standard(const std::uint8_t* data, std::size_t length) {
   std::string out = velsigil::detail::base64url_encode(data, length);
   for (char& c : out) {
@@ -111,19 +102,15 @@ std::string b64_standard(const std::uint8_t* data, std::size_t length) {
 }
 
 struct Keys {
-  // The signing "server": a key pair generated for this run (see make_keys). Its public key is the one the
-  // tests configure, so a Client with the non-loopback kApiUrl accepts it.
+  // This run's signing key pair; the test-vector keys are refused for the non-loopback kApiUrl.
   std::string public_key;
   std::vector<std::uint8_t> seed;
   std::vector<std::uint8_t> wrong_seed;  // another fresh pair: signatures that must not verify
-  // The published test-vector keys (test-vectors.json keys.publicKey / keys.wrongPublicKey) and the seed of
-  // keys.publicKey: the Client refuses them unless the API URL's host is loopback.
+  // The published test-vector keys, refused unless the API host is loopback.
   std::string vector_public_key;
   std::string vector_wrong_public_key;
   std::vector<std::uint8_t> vector_seed;
 };
-
-// ---- signing "server" ---------------------------------------------------------------------------
 
 class Signer {
  public:
@@ -205,7 +192,6 @@ HttpResponse http(long status, std::string body) {
   return response;
 }
 
-// An answer with a `Retry-After` header (the raw value, as the libcurl transport hands it over).
 HttpResponse http(long status, std::string body, std::string retry_after) {
   HttpResponse response = http(status, std::move(body));
   response.retry_after = std::move(retry_after);
@@ -309,8 +295,6 @@ struct Harness {
 
 std::optional<std::string> stored(const Harness& h, const char* key) { return h.store->get(kProduct, key); }
 
-// ---- tests --------------------------------------------------------------------------------------
-
 void test_validate_ok_and_device_secret(const Keys& keys) {
   Harness h(keys);
   const std::int64_t now = kStartTime;
@@ -400,7 +384,7 @@ void test_business_failures(const Keys& keys) {
   check(!revoked.has_feature("pro"), "revoked license grants no features");
   check(!stored(h, velsigil::store_keys::kLease), "license_revoked drops the stored lease");
 
-  // The binding cross-SDK lease-clearing set (SPEC 14) ...
+  // The lease-clearing set ...
   for (const char* revoking : {"license_expired", "license_suspended", "license_banned", "device_revoked",
                                "device_verification_failed", "device_limit_reached", "device_not_activated",
                                "device_not_found", "blacklisted", "product_disabled"}) {
@@ -422,7 +406,7 @@ void test_business_failures(const Keys& keys) {
     check(stored(h, velsigil::store_keys::kLease) == std::string("previous-lease"), std::string(transient) + " keeps the lease");
   }
 
-  // ok without a lease (offline use disabled for the product) also drops an old lease.
+  // ok without a lease (offline use disabled) also drops an old lease.
   h.store->set(kProduct, velsigil::store_keys::kLease, "previous-lease");
   code = "ok";
   message = "License is valid.";
@@ -430,7 +414,6 @@ void test_business_failures(const Keys& keys) {
   check(ok.ok && ok.is_lifetime(), "lifetime license ok");
   check(!stored(h, velsigil::store_keys::kLease), "ok without lease clears the stored lease");
 
-  // Local argument checks: validation_error without any request.
   const std::size_t before = h.server->requests.size();
   check(h.client.validate("").code == "validation_error", "empty key -> validation_error");
   check(h.client.validate("   ").code == "validation_error", "blank key -> validation_error");
@@ -516,8 +499,7 @@ void test_tampered_responses(const Keys& keys) {
        [&](const Harness&, const json&) { return http(200, R"({"error":{"code":"rate_limited","message":"slow down"}})"); }},
       {"empty body", [&](const Harness&, const json&) { return http(200, ""); }},
       {"not json", [&](const Harness&, const json&) { return http(200, "<html>proxy</html>"); }},
-      // LIC-4 device binding: authentic answers about another device (the request's hwid and device
-      // secret were rewritten in transit, e.g. by a license-sharing proxy) are rejected as a whole.
+      // Authentic answers about another device (a rewritten request) are rejected as a whole.
       {"lease of another device",
        [&](const Harness& h, const json& request) {
          json p = ok_payload(request);
@@ -657,15 +639,12 @@ void test_unsigned_errors(const Keys& keys) {
     return http(429, R"({"error":{"code":"rate_limited","message":"Too many requests.","requestId":"req-429"}})");
   };
   const auto limited = h.client.validate(kLicenseKey);
-  // Text from an unsigned body is never surfaced (it is attacker-controllable); the SDK uses fixed text.
   check(limited.message.find("Too many requests.") == std::string::npos && !limited.message.empty(),
         "unsigned error message is SDK text");
   check(limited.request_id == std::string("req-429"), "unsigned error request id");
   check(!limited.retry_after, "429 without a Retry-After header: no retry_after");
 }
 
-// SPEC 14 (1.0.4): ValidationResult::retry_after comes from the Retry-After of every HTTP 429 and 503 answer, whatever
-// code it maps to; nullopt for every other status and when the header is absent or unparseable.
 void test_retry_after(const Keys& keys) {
   struct Case {
     long status;
@@ -722,7 +701,7 @@ void test_retry_after(const Keys& keys) {
     check(result.ok && !result.retry_after, "signed ok with a Retry-After header: no retry_after");
   }
 
-  // The HTTP-date form, measured from the client's clock (kStartTime is Thu, 01 Jan 2026 00:00:00 GMT).
+  // HTTP-dates, from the client's clock (kStartTime is Thu, 01 Jan 2026 00:00:00 GMT).
   struct DateCase {
     long status;
     std::string header;
@@ -746,7 +725,7 @@ void test_retry_after(const Keys& keys) {
     check(result.retry_after == d.expected, "HTTP " + std::to_string(d.status) + " Retry-After '" + d.header + "'");
   }
   {
-    // The local clock, not the learned server offset (a signed clock_skew teaches an offset of one hour first).
+    // Measured from the local clock, not the learned server offset.
     Harness h(keys);
     bool skewed = false;
     h.server->handler = [&h, &skewed](const std::string&, const json& request) {
@@ -762,11 +741,10 @@ void test_retry_after(const Keys& keys) {
   }
 }
 
-// The Retry-After parser itself (src/detail.hpp).
 void test_parse_retry_after() {
   using velsigil::detail::parse_retry_after;
   using Seconds = std::optional<std::int64_t>;
-  constexpr std::int64_t kRfcExample = 784111777;  // Sun, 06 Nov 1994 08:49:37 GMT (RFC 9110's example date)
+  constexpr std::int64_t kRfcExample = 784111777;  // Sun, 06 Nov 1994 08:49:37 GMT
   check(parse_retry_after("30", 0) == Seconds(30), "delta-seconds");
   check(parse_retry_after(" \t30 ", 0) == Seconds(30), "delta-seconds with surrounding whitespace");
   check(parse_retry_after("0", 0) == Seconds(0), "zero");
@@ -801,12 +779,10 @@ void test_parse_retry_after() {
   }
 }
 
-// In-app free trials (SPEC 9.7 "In-app trials"): Client::start_trial.
 void test_start_trial(const Keys& keys) {
   const std::string trial_key = "DEMO-7K3QM-P9XWD-R4TNB-H2CFY-M8LJV";
   const std::int64_t now = kStartTime;
-  // A signed trial start for `request`: the trial license, a new device secret bound to this device, the
-  // trial lease and the key. `mutate` lets a case break one part of it.
+  // A signed trial start; `mutate` lets a case break one part of it.
   auto started = [&trial_key, now](const Signer& signer, const json& request, const std::function<void(json&)>& mutate) {
     json p = payload(request, "trial", true, "ok", now);
     json license = license_json(now + 14 * 86400);
@@ -856,8 +832,7 @@ void test_start_trial(const Keys& keys) {
     check(offline.ok && offline.is_trial() && !offline.trial_key, "offline result of the trial lease");
   }
 
-  // The trial conversion reference (SPEC 9.7): exposed on the online result, never offline; a malformed
-  // value makes the answer an invalid response.
+  // trialRef is exposed on online results only; a malformed one makes the answer invalid.
   {
     const std::string ref = "vtr1_Ab3_-Ab3_-Ab3_-";
     Harness h(keys);
@@ -883,8 +858,7 @@ void test_start_trial(const Keys& keys) {
     check_equal(refused.code, velsigil::codes::kInvalidResponse, "a malformed trialRef is an invalid response");
   }
 
-  // Signed trial failures: results, no key, nothing stored; the e-mail is sent only when given. (A trial is only
-  // ever sent with nothing stored: a stored device secret or lease answers already_licensed locally, see below.)
+  // Signed trial failures store nothing; the e-mail is sent trimmed, and only when given.
   for (const char* code : {velsigil::codes::kTrialAlreadyUsed, velsigil::codes::kTrialUnavailable,
                            velsigil::codes::kTrialEmailRequired, velsigil::codes::kTrialEmailInvalid,
                            velsigil::codes::kTrialEmailNotAccepted, velsigil::codes::kTrialConfirmationSent}) {
@@ -902,8 +876,7 @@ void test_start_trial(const Keys& keys) {
     check_equal(str(h.server->requests.at(0), "email"), "jane@example.com", expected + ": the trimmed e-mail is sent");
   }
 
-  // Review finding 7: a trial answer would overwrite the device secret and lease of the license this device holds.
-  // With a device secret and/or a lease stored, start_trial refuses locally: nothing is sent, nothing changes.
+  // With a device secret and/or lease stored, start_trial refuses locally and sends nothing.
   {
     const std::string paid_secret = "dsk_P4idL1c3P4idL1c3P4idL1c3P4idL1c3P4idL1c3abc";
     struct StoredCase {
@@ -915,7 +888,7 @@ void test_start_trial(const Keys& keys) {
                                           StoredCase{"device secret and lease stored", true, true}}) {
       const std::string name = stored_case.name;
       Harness h(keys);
-      // If anything were sent, the server would start a trial whose secret and lease replace the stored ones.
+      // Would replace the stored secret and lease if anything were sent.
       h.server->handler = [&h, &started](const std::string&, const json& request) { return started(h.signer, request, nullptr); };
       const std::string paid_lease = h.signer.lease(lease_claims(now, now + 7200));
       if (stored_case.secret) h.store->set(kProduct, velsigil::store_keys::kDeviceSecret, paid_secret);
@@ -939,7 +912,7 @@ void test_start_trial(const Keys& keys) {
     }
     check_equal(velsigil::codes::kAlreadyLicensed, "already_licensed", "codes::kAlreadyLicensed");
 
-    // clear_local_state() is the documented way out: then the trial starts normally.
+    // clear_local_state() is the way out.
     Harness h(keys);
     h.server->handler = [&h, &started](const std::string&, const json& request) { return started(h.signer, request, nullptr); };
     h.store->set(kProduct, velsigil::store_keys::kDeviceSecret, paid_secret);
@@ -951,7 +924,7 @@ void test_start_trial(const Keys& keys) {
     check(stored(h, velsigil::store_keys::kDeviceSecret) == std::string(kDeviceSecret), "the trial's device secret is stored");
   }
 
-  // A server without the endpoint (404 not_found) is panel_too_old; unknown_product keeps its code.
+  // 404 not_found means no trial endpoint (panel_too_old); unknown_product keeps its code.
   {
     Harness h(keys);
     h.server->handler = [](const std::string&, const json&) {
@@ -968,7 +941,6 @@ void test_start_trial(const Keys& keys) {
     check(h.client.start_trial().code == "unknown_product", "unknown_product stays itself on /trial");
   }
 
-  // A started trial without a well-formed key, an answer of another type and one for another device are rejected.
   const std::vector<std::pair<std::string, std::function<void(json&)>>> broken = {
       {"no key", [](json& p) { p.erase("trial"); }},
       {"bad key", [](json& p) { p["trial"]["key"] = "bad key\n"; }},
@@ -977,7 +949,7 @@ void test_start_trial(const Keys& keys) {
       {"another device", [](json& p) { p["activation"]["hwidHash"] = std::string(64, 'f'); }},
   };
   for (const auto& entry : broken) {
-    // Plain references (C++17 lambdas cannot capture structured bindings).
+    // C++17 lambdas cannot capture structured bindings.
     const std::string& name = entry.first;
     const std::function<void(json&)>& mutate = entry.second;
     Harness h(keys);
@@ -987,7 +959,6 @@ void test_start_trial(const Keys& keys) {
     check(!stored(h, velsigil::store_keys::kDeviceSecret), "start_trial stores nothing from a rejected answer: " + name);
   }
 
-  // A key in an answer of another type is never exposed; local argument checks send nothing.
   {
     Harness h(keys);
     h.server->handler = [&h, now](const std::string& endpoint, const json& request) {
@@ -1065,8 +1036,6 @@ void test_offline_fallback(const Keys& keys) {
   const auto limited = h.client.validate_with_offline_fallback(kLicenseKey);
   check(!limited.ok && limited.code == "rate_limited" && !limited.offline, "unsigned 429 never falls back");
 
-  // An expired lease while the server is unavailable: the fallback answers what validate_offline() answers
-  // (lease_expired, offline) instead of the network error, and the lease stays stored.
   mode = "down";
   *h.clock = now + 86400;  // lease exp reached
   const auto expired = h.client.validate_with_offline_fallback(kLicenseKey);
@@ -1092,26 +1061,20 @@ void test_offline_fallback(const Keys& keys) {
   check(h.client.validate_offline().code == "no_lease", "revocation removed the stored lease");
 }
 
-// The license server is unavailable although something answers: the app is up but its database is down
-// (500 internal_error, 503 service_busy, an empty 503), or the gateway in front of it (IIS ARR, Caddy) cannot reach
-// it (502/503/504 with an HTML or empty body). Every unsigned HTTP 5xx, whatever its body, falls back to the stored
-// lease like a missing response; validate() itself still reports the real error. Signed answers, 4xx answers and
-// invalid responses stay final.
 void test_offline_fallback_server_unavailable(const Keys& keys) {
   const std::int64_t now = kStartTime;
   struct Case {
     long status;
     std::string body;
-    std::string expected;  // the code validate() reports (the unsigned-error mapping is unchanged)
+    std::string expected;  // the code validate() reports
   };
-  // The first four are the outage shapes that must work without and with a lease (see below).
+  // The first four are also tested without a usable lease (below).
   const std::vector<Case> unavailable = {
       {500, R"({"error":{"code":"internal_error","message":"An unexpected error occurred.","requestId":"req-500"}})",
        "internal_error"},
       {503, "", "network_error"},
       {502, "<html><head><title>502 Bad Gateway</title></head><body><h1>Bad Gateway</h1></body></html>", "network_error"},
       {504, "", "network_error"},
-      // What the server answers when its database is busy or unreachable (with Retry-After).
       {503, R"({"error":{"code":"service_busy","message":"The service is busy. Please try again shortly."}})",
        "internal_error"},
       {500, "<html><body>500 - Internal server error.</body></html>", "internal_error"},
@@ -1147,9 +1110,7 @@ void test_offline_fallback_server_unavailable(const Keys& keys) {
     check(stored(h, velsigil::store_keys::kLease) == lease, name + ": the stored lease is kept");
   }
 
-  // Without a usable lease (docs/CLIENT_PROTOCOL.md section 9): a stored lease that cannot be used gives what
-  // validate_offline() gives (lease_expired / lease_invalid, offline, the lease kept), not the online error; only
-  // when no lease is stored is the original error returned, exactly as validate() reports it (not no_lease).
+  // An unusable lease gives validate_offline()'s result; no lease gives the original error.
   const Signer wrong_signer(keys.wrong_seed);
   struct Unusable {
     std::string name;
@@ -1172,7 +1133,7 @@ void test_offline_fallback_server_unavailable(const Keys& keys) {
        velsigil::codes::kLeaseInvalid, "different product"},
       {"tampered lease",
        [now](const Harness& h) {
-         // A feature added to the claims, the signature of the genuine lease kept.
+         // Altered claims with the genuine lease's signature.
          const std::string genuine = h.signer.lease(lease_claims(now, now + 86400));
          json claims = lease_claims(now, now + 86400);
          claims["features"].push_back("enterprise");
@@ -1222,7 +1183,7 @@ void test_offline_fallback_server_unavailable(const Keys& keys) {
     }
   }
 
-  // Final answers: never overridden by the lease, whatever is stored.
+  // Final answers are never overridden by the lease.
   struct Final {
     std::string name;
     std::function<HttpResponse(const Harness&, const json&)> respond;
@@ -1282,9 +1243,6 @@ void test_offline_fallback_server_unavailable(const Keys& keys) {
   }
 }
 
-// 1.0.4: a result of the offline fallback (ok offline, lease_expired, lease_invalid) carries the retry_after of the
-// failed online attempt, so the application knows when to try online again; validate_offline() called directly
-// never has one.
 void test_offline_fallback_retry_after(const Keys& keys) {
   const std::int64_t now = kStartTime;
   struct Outage {
@@ -1333,7 +1291,7 @@ void test_offline_fallback_retry_after(const Keys& keys) {
       check(result.retry_after == o.expected, o.name + ", invalid lease: the online retry_after");
     }
     {
-      Harness h(keys);  // no lease stored: the online result itself, which already carries it
+      Harness h(keys);  // no lease stored: the online result itself
       h.server->handler = respond;
       const auto result = h.client.validate_with_offline_fallback(kLicenseKey);
       check(!result.ok && !result.offline, o.name + ", no lease: the online failure");
@@ -1341,7 +1299,6 @@ void test_offline_fallback_retry_after(const Keys& keys) {
     }
   }
 
-  // 429 never falls back: the online result keeps its Retry-After.
   Harness h(keys);
   h.store->set(kProduct, velsigil::store_keys::kLease, h.signer.lease(lease_claims(now, now + 86400)));
   h.server->handler = [](const std::string&, const json&) { return http(429, R"({"error":{"code":"rate_limited"}})", "12"); };
@@ -1365,7 +1322,6 @@ void test_deactivate(const Keys& keys) {
   check(stored(h, velsigil::store_keys::kDeviceSecret).has_value(), "failed deactivate keeps the device secret");
   check(!stored(h, velsigil::store_keys::kLease), "device_verification_failed drops the lease");
 
-  // device_not_found: the server no longer knows this device, so its secret and lease are useless.
   h.store->set(kProduct, velsigil::store_keys::kLease, "lease-token");
   code = "device_not_found";
   const auto missing = h.client.deactivate(kLicenseKey);
@@ -1385,7 +1341,6 @@ void test_deactivate(const Keys& keys) {
   check(!stored(h, velsigil::store_keys::kDeviceSecret) && !stored(h, velsigil::store_keys::kLease), "deactivate clears local state");
 }
 
-// LIC-4: answers to device-bound requests must describe this device (activation.hwidHash, lease).
 void test_device_binding(const Keys& keys) {
   Harness h(keys);
   const std::int64_t now = kStartTime;
@@ -1445,7 +1400,7 @@ void test_update_and_download(const Keys& keys) {
   std::string release_code = "ok";
   h.server->handler = [&h, &release_code](const std::string& endpoint, const json& request) {
     if (endpoint == "update-check") {
-      // Like the server (SPEC 10.2): `ok: true` with code `ok` or `no_release`; anything else is a refusal.
+      // `ok: true` comes with code `ok` or `no_release`; anything else is a refusal.
       const bool signed_ok = release_code == "ok" || release_code == "no_release" || release_code == "forged_ok";
       json p = payload(request, "update_check", signed_ok, release_code == "forged_ok" ? "license_expired" : release_code, kStartTime);
       if (release_code == "ok") {
@@ -1488,7 +1443,6 @@ void test_update_and_download(const Keys& keys) {
   release_code = "no_release";
   const auto none = h.client.check_update("1.2.0");
   check(none.ok && none.code == "no_release" && !none.update, "no_release is a successful update check (SPEC 10.2)");
-  // A signed `ok: true` with any other non-ok code is still not a success.
   release_code = "forged_ok";
   const auto inconsistent = h.client.check_update("1.2.0");
   check(!inconsistent.ok && inconsistent.code == "license_expired", "ok flag with a failure code is not ok");
@@ -1505,7 +1459,6 @@ void test_update_and_download(const Keys& keys) {
   check_equal(str(download_request, "deviceSecret"), "dsk_existing", "download sends the device secret");
   check_equal(str(download_request, "version"), "1.4.0", "download sends the version");
 
-  // download_release() validates its input before touching the network.
   velsigil::DownloadInfo info;
   info.url = "http://downloads.example.com/file.zip";
   info.size = 10;
@@ -1520,9 +1473,6 @@ void test_update_and_download(const Keys& keys) {
   check(!std::filesystem::exists(temp, ignored), "nothing written for rejected downloads");
 }
 
-// get_download() applies the HTTPS policy to the signed grant itself, as the Node, Python and C# SDKs
-// do: an unusable URL is an invalid_response without a descriptor, and nothing from that response is
-// persisted. download_release() keeps its own check (see test_update_and_download).
 void test_download_url_policy(const Keys& keys) {
   std::string grant_url;
   auto respond = [&grant_url](const Harness& h, const json& request) {
@@ -1569,7 +1519,7 @@ void test_download_url_policy(const Keys& keys) {
     check(h.server->requests.size() == 1, name + ": no retry");
   }
 
-  // {API URL, grant URL}: https anywhere, plain http to loopback hosts, server-relative URLs.
+  // {API URL, grant URL}: https anywhere, plain http to loopback, server-relative URLs.
   const std::vector<std::pair<std::string, std::string>> accepted = {
       {kApiUrl, "https://downloads.example.com/app.zip"},
       {kApiUrl, "HTTPS://cdn.example.com/app.zip"},
@@ -1590,7 +1540,6 @@ void test_download_url_policy(const Keys& keys) {
     check(stored(h, velsigil::store_keys::kDeviceSecret) == std::string(kDeviceSecret), name + ": issued device secret persisted");
   }
 
-  // allow_insecure_http permits plain http to any host, but never credentials or other schemes.
   {
     Harness h(keys);
     h.server->handler = [&h, &respond](const std::string&, const json& request) { return respond(h, request); };
@@ -1716,9 +1665,6 @@ void test_configuration(const Keys& keys) {
   }
 }
 
-// The public keys of the shared test vectors (their private seeds are published in test-vectors.json) are
-// refused like an invalid public key unless the API URL's host is loopback. The decoded bytes are compared,
-// so another encoding of a test key is refused too.
 void test_published_test_keys(const Keys& keys) {
   auto server = std::make_shared<FakeServer>();
   server->handler = [](const std::string&, const json&) { return unreachable("offline"); };
@@ -1741,7 +1687,7 @@ void test_published_test_keys(const Keys& keys) {
       {"keys.wrongPublicKey without padding", unpadded(keys.vector_wrong_public_key)},
   };
 
-  // (a) Refused with a non-loopback HTTPS URL: same path as an invalid public key, nothing is ever sent.
+  // (a) Refused with a non-loopback URL; nothing is ever sent.
   const std::vector<std::string> remote_urls = {
       kApiUrl,
       "https://licenses.example.com/api/client/v1",
@@ -1750,7 +1696,7 @@ void test_published_test_keys(const Keys& keys) {
       "https://127.0.0.1.example.com",
       "https://192.168.1.10",
       "https://[::2]:8443",
-      // Look-alikes of the loopback hosts that name other hosts (or are spelled differently): never exempt.
+      // Look-alikes of the loopback hosts: never exempt.
       "https://localhost.",
       "https://127.1",
       "https://[0:0:0:0:0:0:0:1]",
@@ -1772,7 +1718,6 @@ void test_published_test_keys(const Keys& keys) {
     }
   }
   {
-    // allow_insecure_http admits plain http to any host, never a test key to a non-loopback one.
     auto insecure = options();
     insecure.allow_insecure_http = true;
     velsigil::Client client("http://licenses.example.com", kProduct, keys.vector_public_key, insecure);
@@ -1780,8 +1725,6 @@ void test_published_test_keys(const Keys& keys) {
           "allow_insecure_http does not admit a test key for a non-loopback host");
   }
   {
-    // The public key decoder accepts only the standard alphabet, so the URL-safe spelling of a test key is no way
-    // around the guard either (it is refused as an invalid key).
     std::string url_safe = keys.vector_public_key;
     for (char& c : url_safe) {
       if (c == '+') c = '-';
@@ -1793,7 +1736,7 @@ void test_published_test_keys(const Keys& keys) {
           "the URL-safe spelling of keys.publicKey is refused");
   }
 
-  // (b) Accepted with a loopback URL (a local test server), over http or https.
+  // (b) Accepted with a loopback URL, over http or https.
   const std::vector<std::string> loopback_urls = {
       "http://localhost:3000",
       "http://LocalHost:3000/api/client/v1",
@@ -1813,7 +1756,6 @@ void test_published_test_keys(const Keys& keys) {
     }
   }
   {
-    // End to end: answers signed with the published seed verify for a local test server.
     Keys vector_keys = keys;
     vector_keys.public_key = keys.vector_public_key;
     vector_keys.seed = keys.vector_seed;
@@ -1826,7 +1768,7 @@ void test_published_test_keys(const Keys& keys) {
     check(h.client.validate(kLicenseKey).ok, "the test-vector key verifies the answers of a local test server");
   }
 
-  // (c) A real (random) product key is still accepted with a non-loopback URL.
+  // (c) A random product key is still accepted with a non-loopback URL.
   {
     std::array<unsigned char, crypto_sign_PUBLICKEYBYTES> random_public{};
     std::array<unsigned char, crypto_sign_SECRETKEYBYTES> random_secret{};
@@ -1842,7 +1784,7 @@ void test_published_test_keys(const Keys& keys) {
     check(client.is_configured(), "this run's signing key is accepted with a non-loopback URL");
   }
 
-  // One loopback rule: a host may use the test keys exactly when it may use plain http:// (the same helper).
+  // A host may use the test keys exactly when it may use plain http://.
   const std::vector<std::string> hosts = {
       "localhost", "LOCALHOST:3000", "127.0.0.1", "127.0.0.1:8080", "[::1]", "[::1]:3000", "localhost.",
       "127.0.0.2", "0.0.0.0", "[::2]", "localhost.example.com", "licenses.example.com", "localhost@evil.example", "[::1",
@@ -1856,10 +1798,6 @@ void test_published_test_keys(const Keys& keys) {
         "is_loopback_url sanity");
 }
 
-// The public low-level helpers (verify_envelope_typed, verify_lease) verify answers and leases signed with a
-// product's own key, and refuse the published test-vector key always, like an invalid key, even for answers and
-// leases its published seed really signed: they have no API URL that could name a local test server. The
-// internal entry points (detail::*_unguarded, for the SDK's vector tests) still verify them.
 void test_low_level_helpers(const Keys& keys) {
   constexpr char kNonce[] = "low-level-helpers-nonce-0123456789";
   json request = json::object();
@@ -1871,7 +1809,7 @@ void test_low_level_helpers(const Keys& keys) {
   const std::int64_t now = kStartTime + 60;
 
   {
-    // This run's key pair stands for a product's own key: verified as usual.
+    // This run's key pair stands for a product's own key.
     const Signer signer(keys.seed);
     const std::string envelope = signer.envelope(answer);
     const std::string lease = signer.lease(claims);
@@ -1932,7 +1870,7 @@ void test_store_failures_are_contained(const Keys& keys) {
   client.clear_local_state();
 }
 
-// Final sweep F-SDK-1: a store read that throws is not "nothing stored": start_trial fails closed.
+// Throws on the next `failing_reads` reads.
 class FlakyStore final : public velsigil::IStore {
  public:
   std::optional<std::string> get(const std::string& product_id, const std::string& key) override {
@@ -1953,7 +1891,6 @@ class FlakyStore final : public velsigil::IStore {
 
 void test_store_read_failures_fail_closed(const Keys& keys) {
   auto server = std::make_shared<FakeServer>();
-  // Whatever a trial start would get back: it must never be sent.
   server->handler = [](const std::string&, const json&) { return unreachable("no request may be sent"); };
   auto store = std::make_shared<FlakyStore>();
   const std::string paid_secret = "dsk_P4idL1c3P4idL1c3P4idL1c3P4idL1c3P4idL1c3abc";
@@ -2021,7 +1958,6 @@ void test_file_store(const Keys& keys) {
     check(store.get(kProduct, velsigil::store_keys::kLease) == std::string("fresh"), "replaced file is readable");
   }
 
-  // Device secret survives an application restart (new Client + new FileStore on the same file).
   {
     const Signer signer(keys.seed);
     auto server = std::make_shared<FakeServer>();
@@ -2050,8 +1986,7 @@ void test_file_store(const Keys& keys) {
   check(default_path.empty() || default_path.filename() == "velsigil-license.json", "default_path file name");
 
 #if !defined(_WIN32)
-  // Final sweep F-SDK-1: a store file that exists but cannot be read is never taken for empty, and never
-  // rebuilt from nothing (that would erase every product's device secret). Root reads anything: skipped.
+  // Root can read any file, so the unreadable-file case is skipped.
   if (::geteuid() != 0) {
     const fs::path locked = dir / "locked.json";
     {
@@ -2084,9 +2019,6 @@ void test_file_store(const Keys& keys) {
   fs::remove_all(dir, ec);
 }
 
-// Legacy migration: a store file written by SDK versions released under the former product name
-// (veltrix-license.json) is read until the first write to the new default file (velsigil-license.json),
-// so an application keeps its device secret and offline lease after updating the SDK.
 void test_file_store_legacy_fallback(const Keys& keys) {
   namespace fs = std::filesystem;
   const auto suffix = velsigil::detail::random_hex(8);
@@ -2130,7 +2062,6 @@ void test_file_store_legacy_fallback(const Keys& keys) {
     check(store.get(kProduct, velsigil::store_keys::kLease) == std::string("legacy-lease"), "legacy lease is read");
     check(!fs::exists(file, ec), "reading does not create the new file");
 
-    // The first write goes to the new file and carries the legacy data over.
     check(store.set(kOtherProduct, velsigil::store_keys::kLease, "other-lease"), "first write after the fallback");
     check(fs::exists(file, ec), "first write creates the new file");
   }
@@ -2139,13 +2070,11 @@ void test_file_store_legacy_fallback(const Keys& keys) {
     check(reopened.get(kProduct, velsigil::store_keys::kDeviceSecret) == std::string(kDeviceSecret), "device secret migrated");
     check(reopened.get(kProduct, velsigil::store_keys::kLease) == std::string("legacy-lease"), "lease migrated");
     check(reopened.get(kOtherProduct, velsigil::store_keys::kLease) == std::string("other-lease"), "new value written");
-    // Once the new file exists the legacy file is ignored.
     check(reopened.erase(kProduct, velsigil::store_keys::kDeviceSecret), "erase after migration");
     check(!reopened.get(kProduct, velsigil::store_keys::kDeviceSecret), "legacy file no longer consulted");
   }
   check(read_text(legacy) == legacy_before, "legacy file is never modified");
 
-  // Only the default file name falls back; a custom path never reads the legacy file.
   {
     velsigil::FileStore custom(dir / "custom.json");
     check(custom.legacy_path().empty(), "custom file name has no legacy fallback");
@@ -2157,8 +2086,6 @@ void test_file_store_legacy_fallback(const Keys& keys) {
           "default_path store falls back to the legacy file in the same directory");
   }
 
-  // End to end: after the SDK update the stored lease still works offline and the device secret is
-  // still sent, so the device is neither re-activated nor reported as a clone.
   {
     const Signer signer(keys.seed);
     const fs::path app_dir = dir / "app";
@@ -2200,12 +2127,10 @@ void test_result_helpers() {
   check(result.expires_at() == 1000000 && !result.is_lifetime(), "expires_at");
   check(result.seconds_until_expiry(400000) == 600000, "seconds_until_expiry");
   check(result.seconds_until_expiry(2000000) == 0, "seconds_until_expiry clamps at zero");
-  // Final sweep F-SDK-4: days left are rounded up (CLIENT_PROTOCOL 5.2): a part day counts as a day left.
   check(result.days_until_expiry(1000000 - 3 * 86400 - 5) == 4, "days_until_expiry rounds up");
   check(result.days_until_expiry(1000000 - 3 * 86400) == 3, "days_until_expiry of whole days");
   check(result.days_until_expiry(1000000 - 1) == 1, "days_until_expiry is 1 throughout the last day");
   check(result.days_until_expiry(1000000) == 0 && result.days_until_expiry(2000000) == 0, "days_until_expiry is 0 once expired");
-  // Without an argument it measures at the result's own time: the signed server time, else the offline check time.
   result.server_time = 1000000 - 14 * 86400;
   result.reference_time = 1000000 - 86400 + 1;
   check(result.days_until_expiry() == 14, "days_until_expiry() measures at server_time (an N-day trial shows N)");
@@ -2246,10 +2171,7 @@ void test_concurrent_use(const Keys& keys) {
   check(nonces.size() == static_cast<std::size_t>(kThreads * kCallsPerThread), "every concurrent request has a unique nonce");
 }
 
-// Final sweep F-SDK-2 / F-CLIENT-4: device-bound calls are serialized per Client (as in the Node and Python SDKs).
 void test_device_calls_are_serialized(const Keys& keys) {
-  // Two concurrent first activations: the second sends the secret the first one stored, instead of none (which the
-  // server counts as a secret mismatch, and strict binding answers with device_verification_failed).
   {
     Harness h(keys);
     std::atomic<bool> issued{false};
@@ -2272,8 +2194,6 @@ void test_device_calls_are_serialized(const Keys& keys) {
     check(stored(h, velsigil::store_keys::kDeviceSecret) == std::string(kDeviceSecret), "the issued device secret is stored");
   }
 
-  // A trial start while a validation is in progress waits for it, then refuses: the already_licensed check and the
-  // trial request form one step, so the trial answer can never replace the license the validation stores.
   {
     Harness h(keys);
     h.server->handler = [&h](const std::string& endpoint, const json& request) {
@@ -2295,7 +2215,6 @@ void test_device_calls_are_serialized(const Keys& keys) {
   }
 }
 
-// Final sweep F-SDK-3: systemd's placeholder is not a machine id (the same rule in every SDK).
 void test_machine_id_placeholder() {
   using velsigil::detail::usable_machine_id;
   check(usable_machine_id("4c4c4544004235108051b4c04f4e4b32\n") == std::string("4c4c4544004235108051b4c04f4e4b32\n"),
@@ -2305,8 +2224,7 @@ void test_machine_id_placeholder() {
   check(!usable_machine_id(" \n"), "an empty machine-id file is skipped");
 }
 
-// The signing "server" uses key pairs generated for this run: the published test-vector key is refused for
-// the non-loopback kApiUrl (test_published_test_keys). The vector keys are loaded for that test only.
+// Signs with fresh key pairs: the published vector key is refused for the non-loopback kApiUrl.
 Keys make_keys(const std::string& vectors_path) {
   std::ifstream in(vectors_path, std::ios::in | std::ios::binary);
   if (!in) throw std::runtime_error("cannot open test vectors: " + vectors_path);

@@ -11,10 +11,7 @@
     <RootNamespace>Velsigil.Client.Tests</RootNamespace>
   </PropertyGroup>
 
-  <!--
-    By default the tests run against the net8.0 build of the SDK. Pass -p:VelsigilTestNetStandard=true to run
-    the same suite against the netstandard2.0 build (the asset .NET Framework 4.7.2+ and Unity consume).
-  -->
+  <!-- -p:VelsigilTestNetStandard=true runs the tests against the netstandard2.0 build. -->
   <PropertyGroup Condition="'$(VelsigilTestNetStandard)' == 'true'">
     <DefineConstants>$(DefineConstants);VELSIGIL_NETSTANDARD</DefineConstants>
   </PropertyGroup>
@@ -37,7 +34,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The canonical cross-SDK vectors (sdks/test-vectors.json); never copied or edited by hand. -->
     <Content Include="..\..\..\test-vectors.json" Link="test-vectors.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

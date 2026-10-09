@@ -11,10 +11,7 @@ using System.Threading.Tasks;
 
 namespace Velsigil.Client.Tests.Infrastructure;
 
-/// <summary>
-/// A minimal HTTP/1.1 server on 127.0.0.1 (random port) so the SDK can be exercised over real sockets
-/// with its own default <see cref="HttpClient"/>. One request per connection (<c>Connection: close</c>).
-/// </summary>
+/// <summary>Minimal HTTP/1.1 server on 127.0.0.1 for tests over real sockets; one request per connection.</summary>
 internal sealed class LocalHttpServer : IDisposable
 {
     private readonly TcpListener _listener;

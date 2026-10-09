@@ -159,7 +159,7 @@ class ClientTestCase(unittest.TestCase):
 
 
 class DenialFeatureTests(ClientTestCase):
-    """MONEY-V1: a signed denial never unlocks a feature, not even through ``license.has_feature``."""
+    """A signed denial never unlocks a feature, not even through ``license.has_feature``."""
 
     def test_denials_with_features_grant_nothing(self):
         logic = LicenseServerLogic()
@@ -179,7 +179,7 @@ class DenialFeatureTests(ClientTestCase):
                 result = client.validate(LICENSE_KEY)
                 self.assertFailure(result, code)
                 self.assertEqual(result.license.status, status)
-                self.assertEqual(result.license.features, ("pro", "export"))  # informational only
+                self.assertEqual(result.license.features, ("pro", "export"))
                 self.assertFalse(result.license.has_feature("pro"))
 
     def test_ok_result_and_hand_made_license(self):
@@ -262,7 +262,6 @@ class ValidateTests(ClientTestCase):
         bodies = server.bodies("/validate")
         self.assertNotIn("deviceSecret", bodies[0])
         self.assertEqual(bodies[1]["deviceSecret"], DEVICE_SECRET)
-        # A response without a secret must not erase the stored one.
         self.assertEqual(store.load(PRODUCT_ID).device_secret, DEVICE_SECRET)
 
     def test_device_secret_survives_restart_with_file_store(self):
@@ -297,7 +296,6 @@ class ValidateTests(ClientTestCase):
         self.assertEqual(result.message, "license suspended")
         self.assertEqual(result.license.status, "suspended")
         self.assertIsNotNone(result.request_id)
-        # The definitive signed failure revokes offline use; the device secret stays.
         state = store.load(PRODUCT_ID)
         self.assertIsNone(state.lease_token)
         self.assertEqual(state.device_secret, DEVICE_SECRET)
@@ -397,7 +395,6 @@ class ValidateTests(ClientTestCase):
         self.assertEqual(len(bodies), 2)
         self.assertNotEqual(bodies[0]["nonce"], bodies[1]["nonce"])
         self.assertAlmostEqual(bodies[1]["timestamp"], time.time() + skew, delta=5)
-        # The learned offset is reused: the next call needs no retry.
         self.assertTrue(client.validate(LICENSE_KEY).ok)
         self.assertEqual(len(server.bodies("/validate")), 3)
 
@@ -448,7 +445,6 @@ class HttpErrorTests(ClientTestCase):
         self.assertEqual(result.request_id, "3f2e1d0c-0000-4000-8000-000000000000")
 
     def test_retry_after_on_every_429_and_503(self):
-        # SPEC 14 (1.0.4): the Retry-After of every 429 and 503 answer, whatever code it maps to; null otherwise.
         def answer(status, body, retry_after=None):
             return Reply(status, body, headers=None if retry_after is None else {"Retry-After": retry_after})
 
@@ -466,7 +462,7 @@ class HttpErrorTests(ClientTestCase):
             ("429 without body", answer(429, b"", "12"), Code.RATE_LIMITED, 12),
             ("503 without Retry-After", answer(503, None), Code.NETWORK_ERROR, None),
             ("503 unparseable Retry-After", answer(503, None, "soon"), Code.NETWORK_ERROR, None),
-            # str.isdigit() accepts superscript digits, int() does not: such a header must not break the result.
+            # str.isdigit() accepts superscript digits; int() does not.
             ("503 non-ASCII digits", answer(503, None, "\u00b3"), Code.NETWORK_ERROR, None),
             ("429 non-ASCII digits", answer(429, b"", "\u00b3"), Code.RATE_LIMITED, None),
             ("429 negative delta", answer(429, b"", "-5"), Code.RATE_LIMITED, None),
@@ -506,7 +502,6 @@ class HttpErrorTests(ClientTestCase):
             with self.subTest(case=name):
                 server.handler = lambda request, s=status, v=value: Reply(s, None, headers={"Retry-After": v})
                 self.assertEqual(client.validate(LICENSE_KEY).retry_after, expected)
-        # A part second is rounded up, measured from the local clock (the learned server offset plays no part).
         clock.now = 1767225600.25
         server.handler = lambda request: Reply(503, None, headers={"Retry-After": "Thu, 01 Jan 2026 00:01:30 GMT"})
         self.assertEqual(client.validate(LICENSE_KEY).retry_after, 90)
@@ -534,7 +529,7 @@ class HttpErrorTests(ClientTestCase):
         server = self.start(self._error(500, "internal_error"))
         result = self.make_client(server.url).validate(LICENSE_KEY)
         self.assertFailure(result, Code.INTERNAL_ERROR)
-        self.assertNotIn("server text", result.message)  # unsigned text is not echoed
+        self.assertNotIn("server text", result.message)
 
     def test_status_fallbacks_without_error_body(self):
         cases = ((429, Code.RATE_LIMITED), (500, Code.INTERNAL_ERROR), (503, Code.NETWORK_ERROR), (418, Code.INVALID_RESPONSE))
@@ -544,8 +539,6 @@ class HttpErrorTests(ClientTestCase):
                 self.assertFailure(self.make_client(server.url).validate(LICENSE_KEY), code)
 
     def test_gateway_status_mapping_follows_the_cross_sdk_rule(self):
-        # SPEC 14: 502/503/504 without a Velsigil error body -> network_error
-        # (offline fallback applies); with one -> its known code or internal_error.
         cases = (
             (502, b"<html>Bad Gateway</html>", Code.NETWORK_ERROR),
             (503, {"message": "Service Unavailable"}, Code.NETWORK_ERROR),
@@ -562,8 +555,6 @@ class HttpErrorTests(ClientTestCase):
                 self.assertFailure(self.make_client(server.url).validate(LICENSE_KEY), code)
 
     def test_unsigned_codes_are_whitelisted(self):
-        # Unknown codes in an unsigned body are ignored; the status decides
-        # (400 -> validation_error per the cross-SDK mapping of SPEC 14).
         for status, code, expected in ((400, "ok", Code.VALIDATION_ERROR), (429, "license_valid", Code.RATE_LIMITED)):
             with self.subTest(code=code):
                 body = {"ok": True, "error": {"code": code, "message": "ok"}}
@@ -622,14 +613,12 @@ class OfflineTests(ClientTestCase):
         self.assertEqual(result.activation.id, ACTIVATION_ID)
         self.assertEqual(result.lease.expires_at, 1767225600 + 86400)
 
-        clock.advance(86400)  # past the lease expiry
+        clock.advance(86400)
         expired = offline.validate_with_offline_fallback(LICENSE_KEY)
-        # The stored lease is unusable: the result is validate_offline()'s, not the original network_error.
         self.assertFailure(expired, Code.LEASE_EXPIRED)
         self.assertTrue(expired.offline)
         self.assertIsNone(expired.http_status)
         self.assertFailure(offline.validate_offline(), Code.LEASE_EXPIRED)
-        # An expired lease is kept, as by validate_offline().
         self.assertEqual(store.load(PRODUCT_ID).lease_token, first.lease.token)
 
     def test_gateway_outage_falls_back(self):
@@ -656,7 +645,6 @@ class OfflineTests(ClientTestCase):
         self.assertFailure(client.validate_offline(), Code.NO_LEASE)
 
     def test_no_fallback_on_rate_limit_or_invalid_response(self):
-        # (An unsigned 5xx such as 500 internal_error does fall back: ServerUnavailableFallbackTests.)
         store = MemoryStore()
         logic = LicenseServerLogic()
         server = self.start(logic)
@@ -673,7 +661,6 @@ class OfflineTests(ClientTestCase):
                 result = client.validate_with_offline_fallback(LICENSE_KEY)
                 self.assertFailure(result, code)
                 self.assertFalse(result.offline)
-        # None of those may wipe the stored lease.
         self.assertTrue(client.validate_offline().ok)
 
     def test_lease_dropped_for_exactly_the_binding_denial_set(self):
@@ -725,7 +712,6 @@ class OfflineTests(ClientTestCase):
                 self.assertTrue(client.validate_offline().ok)
 
     def test_free_trial_flag_online_and_offline(self):
-        # SPEC 9.7: the optional signed ``trial`` field of the license and of the lease.
         clock = FakeClock(1767225600)
         store = MemoryStore()
         logic = LicenseServerLogic(clock=clock)
@@ -767,7 +753,6 @@ class OfflineTests(ClientTestCase):
         result = client.validate_offline()
         self.assertFailure(result, Code.NO_LEASE)
         self.assertTrue(result.offline)
-        # No stored lease at all: the fallback returns the original online failure as is, not no_lease.
         plain = client.validate(LICENSE_KEY)
         fallback = client.validate_with_offline_fallback(LICENSE_KEY)
         self.assertFailure(fallback, Code.NETWORK_ERROR)
@@ -793,7 +778,6 @@ class OfflineTests(ClientTestCase):
                 client = self.make_client(refused_url(), store=store)
                 result = client.validate_offline()
                 self.assertFailure(result, Code.LEASE_INVALID)
-                # Server unreachable: the fallback reports the unusable lease, not network_error.
                 fallback = client.validate_with_offline_fallback(LICENSE_KEY)
                 self.assertFailure(fallback, Code.LEASE_INVALID)
                 self.assertTrue(fallback.offline)
@@ -804,8 +788,7 @@ class OfflineTests(ClientTestCase):
         self.assertTrue(self.make_client(refused_url(), store=store).validate_offline().ok)
 
     def test_success_with_lease_for_other_device_is_rejected(self):
-        # LIC-4: a license-sharing proxy rewrites hwid + deviceSecret to one real activation; the
-        # signed answer then carries that device's lease. Nothing from it may be used.
+        # Simulates a license-sharing proxy: the signed lease belongs to another device.
         own_lease = make_lease(int(time.time()) + 3600)
         store = MemoryStore()
         store.save(PRODUCT_ID, StoredState(device_secret=DEVICE_SECRET, lease_token=own_lease))
@@ -830,7 +813,6 @@ class OfflineTests(ClientTestCase):
         self.assertIn("different device", result.message)
         self.assertIsNone(result.license)
         self.assertEqual(store.load(PRODUCT_ID), StoredState(device_secret=DEVICE_SECRET, lease_token=own_lease))
-        # invalid_response never triggers the offline fallback.
         self.assertFailure(client.validate_with_offline_fallback(LICENSE_KEY), Code.INVALID_RESPONSE)
 
     def test_success_with_lease_for_other_product_is_rejected(self):
@@ -860,14 +842,13 @@ class OfflineTests(ClientTestCase):
         self.assertIsNone(store.load(PRODUCT_ID).lease_token)
 
 
-# An IIS ARR style gateway error page (the app behind the proxy is down).
+# An IIS ARR gateway error page.
 HTML_502 = (
     b"<!DOCTYPE html><html><head><title>502 - Web server received an invalid response while acting as a gateway "
     b"or proxy server.</title></head><body><h1>Server Error</h1></body></html>"
 )
 
-#: A server (or the proxy in front of it) that is up but cannot serve: unsigned 5xx answers, each with the
-#: code and status plain validate() reports (unchanged by the fallback rule).
+#: Unsigned 5xx answers: (description, reply, code and status plain validate() reports).
 UNAVAILABLE_REPLIES = (
     (
         "500 Velsigil internal_error (database down)",
@@ -897,7 +878,7 @@ UNAVAILABLE_REPLIES = (
     ("503 oversized body", lambda request: Reply(503, b"x" * (MAX_RESPONSE_BYTES + 1)), Code.INVALID_RESPONSE, 503),
 )
 
-#: Final answers: returned as is even with a usable lease (last field: whether the stored lease survives).
+#: Never fall back; the last field says whether the stored lease survives.
 FINAL_REPLIES = (
     (
         "429 rate_limited, Retry-After",
@@ -945,7 +926,6 @@ class ServerUnavailableFallbackTests(ClientTestCase):
                 stored = store.load(PRODUCT_ID)
                 self.clock.advance(3600)
                 self.logic.override = reply
-                # validate() itself is unchanged: it reports the real error and never uses the lease.
                 plain = client.validate(LICENSE_KEY)
                 self.assertFailure(plain, code)
                 self.assertEqual(plain.http_status, status)
@@ -957,13 +937,9 @@ class ServerUnavailableFallbackTests(ClientTestCase):
                 self.assertEqual(result.license.id, LICENSE_OBJ["id"])
                 self.assertEqual(result.activation.id, ACTIVATION_ID)
                 self.assertIsNone(result.http_status)
-                # An unsigned error never changes the stored state.
                 self.assertEqual(store.load(PRODUCT_ID), stored)
 
     def test_empty_503_is_network_error_for_validate(self):
-        # The server's "database unreachable" answer (503, Retry-After, empty body) is a transport-level
-        # failure for this SDK's validate() too, as in 1.0.0-1.0.2 (502/503/504 without a Velsigil body).
-        # Since 1.0.4 its Retry-After is exposed as well (SPEC 14: every 429 and 503).
         self.logic.override = lambda request: Reply(503, None, headers={"Retry-After": "30"})
         client, _store = self._client(with_lease=False)
         result = client.validate(LICENSE_KEY)
@@ -972,8 +948,6 @@ class ServerUnavailableFallbackTests(ClientTestCase):
         self.assertEqual(result.retry_after, 30)
 
     def test_fallback_results_carry_the_online_retry_after(self):
-        # 1.0.4: when the fallback answers from the stored lease (ok, lease_expired, lease_invalid), the result
-        # carries the Retry-After of the failed online attempt, so the app knows when to try online again.
         busy = {"error": {"code": "service_busy", "message": "Busy."}}
         outages = (
             ("503 empty body", lambda request: Reply(503, None, headers={"Retry-After": "30"}), 30),
@@ -993,13 +967,12 @@ class ServerUnavailableFallbackTests(ClientTestCase):
                 result = client.validate_with_offline_fallback(LICENSE_KEY)
                 self.assertTrue(result.ok and result.offline, result)
                 self.assertEqual(result.retry_after, retry_after)
-                # validate_offline() called directly knows nothing of an online attempt.
                 direct = client.validate_offline()
                 self.assertTrue(direct.ok and direct.offline, direct)
                 self.assertIsNone(direct.retry_after)
             with self.subTest(case=name, lease="expired"):
                 client, _store = self._client()
-                self.clock.advance(86400)  # the lease's exp is reached
+                self.clock.advance(86400)
                 self.logic.override = reply
                 result = client.validate_with_offline_fallback(LICENSE_KEY)
                 self.assertFailure(result, Code.LEASE_EXPIRED)
@@ -1019,19 +992,16 @@ class ServerUnavailableFallbackTests(ClientTestCase):
                 self.assertEqual(result.retry_after, retry_after)
                 self.assertIsNone(client.validate_offline().retry_after)
             with self.subTest(case=name, lease="none"):
-                # No stored lease: the online result itself, which already carries it.
                 client, _store = self._client(with_lease=False)
                 self.logic.override = reply
                 result = client.validate_with_offline_fallback(LICENSE_KEY)
                 self.assertFalse(result.ok or result.offline, result)
                 self.assertEqual(result.retry_after, retry_after)
-        # No HTTP answer at all: nothing to carry.
         client, store = self._client()
         refused = self.make_client(refused_url(), store=store, clock=self.clock)
         result = refused.validate_with_offline_fallback(LICENSE_KEY)
         self.assertTrue(result.ok and result.offline, result)
         self.assertIsNone(result.retry_after)
-        # 429 never falls back: the online result keeps its Retry-After.
         self.logic.override = lambda request: Reply(429, {"error": {"code": "rate_limited"}}, headers={"Retry-After": "12"})
         limited = client.validate_with_offline_fallback(LICENSE_KEY)
         self.assertFailure(limited, Code.RATE_LIMITED)
@@ -1039,9 +1009,7 @@ class ServerUnavailableFallbackTests(ClientTestCase):
         self.assertEqual(limited.retry_after, 12)
 
     def test_a_failing_date_parser_does_not_break_a_503(self):
-        # email.utils raised errors other than ValueError on odd input in some 3.x releases. A Retry-After the
-        # parser chokes on is ignored: the 503 stays network_error with its http_status, so the fallback still
-        # applies (an escaping exception would have made it an invalid_response without http_status).
+        # Some 3.x email.utils releases raise more than ValueError on odd input.
         client, _store = self._client()
         self.logic.override = lambda request: Reply(503, None, headers={"Retry-After": "Thu, 01 Jan 2026 12.34.56.78"})
         with mock.patch.object(client_module, "parsedate_to_datetime", side_effect=UnboundLocalError("tz")):
@@ -1060,7 +1028,6 @@ class ServerUnavailableFallbackTests(ClientTestCase):
                 self.logic.override = reply
                 plain = client.validate(LICENSE_KEY)
                 result = client.validate_with_offline_fallback(LICENSE_KEY)
-                # No stored lease: the original online failure as is (not no_lease).
                 self.assertFailure(result, code)
                 self.assertEqual(result.http_status, status)
                 self.assertFalse(result.offline)
@@ -1075,15 +1042,13 @@ class ServerUnavailableFallbackTests(ClientTestCase):
             with self.subTest(case=name):
                 client, store = self._client()
                 stored = store.load(PRODUCT_ID)
-                self.clock.advance(86400)  # the lease's exp is reached
+                self.clock.advance(86400)
                 self.logic.override = reply
                 result = client.validate_with_offline_fallback(LICENSE_KEY)
-                # The stored lease is unusable: validate_offline()'s result, not the original failure.
                 self.assertFailure(result, Code.LEASE_EXPIRED)
                 self.assertTrue(result.offline)
                 self.assertIsNone(result.http_status)
                 self.assertFailure(client.validate_offline(), Code.LEASE_EXPIRED)
-                # The expired lease is kept, as by validate_offline().
                 self.assertEqual(store.load(PRODUCT_ID), stored)
 
     def test_unsigned_5xx_with_an_unusable_lease_reports_lease_invalid(self):
@@ -1104,7 +1069,6 @@ class ServerUnavailableFallbackTests(ClientTestCase):
                     self.assertFailure(result, Code.LEASE_INVALID)
                     self.assertTrue(result.offline)
                     self.assertIsNone(result.http_status)
-                    # The stored state is left as validate_offline() leaves it.
                     self.assertEqual(store.load(PRODUCT_ID), StoredState(lease_token=token))
 
     def test_final_answers_never_fall_back(self):
@@ -1126,7 +1090,6 @@ class ServerUnavailableFallbackTests(ClientTestCase):
                     self.assertFailure(client.validate_offline(), Code.NO_LEASE)
 
     def test_transport_failures_still_fall_back(self):
-        # Timeout (the server accepts but never answers in time) and connection refused.
         client, store = self._client(timeout=0.5)
         self.logic.override = lambda request: Reply(200, signed(request, "ok", ok=True).body, delay=5)
         result = client.validate_with_offline_fallback(LICENSE_KEY)
@@ -1150,7 +1113,6 @@ class ServerUnavailableFallbackTests(ClientTestCase):
             self.assertFalse(unavailable(failure(Code.INTERNAL_ERROR, status)), status)
         self.assertFalse(unavailable(failure(Code.RATE_LIMITED, 429)))
         self.assertFalse(unavailable(failure(Code.LICENSE_REVOKED, 200)))
-        # A signed answer (always http_status 200) never falls back, whatever code it carries.
         self.assertFalse(unavailable(failure(Code.NETWORK_ERROR, 200)))
         self.assertFalse(unavailable(failure(Code.INTERNAL_ERROR, 200)))
         self.assertFalse(unavailable(failure(Code.LEASE_EXPIRED, offline=True)))
@@ -1158,7 +1120,7 @@ class ServerUnavailableFallbackTests(ClientTestCase):
 
 
 class DeviceBindingTests(ClientTestCase):
-    """LIC-4: signed answers to device-bound requests must describe this device (activation.hwidHash)."""
+    """Signed answers to device-bound requests must describe this device."""
 
     OTHER_SECRET = "dsk_" + "Q" * 40
 
@@ -1213,7 +1175,6 @@ class DeviceBindingTests(ClientTestCase):
                 result = call()
                 self.assertFailure(result, Code.INVALID_RESPONSE)
                 self.assertIsNone(result.download)
-                # No foreign secret stored, own lease kept, nothing cleared by a foreign "ok".
                 self.assertEqual(store.load(PRODUCT_ID), initial)
         self.assertTrue(client.validate_offline().ok)
 
@@ -1257,7 +1218,6 @@ class OperationTests(ClientTestCase):
         self.assertEqual(set(body), {"productId", "version", "nonce", "timestamp"})
 
     def test_no_release(self):
-        # Exactly what the server sends (SPEC 10.2): ok=true, code no_release, update=null.
         server = self.start(lambda request: signed(request, "no_release", ok=True, type_="update_check"))
         result = self.make_client(server.url).check_update()
         self.assertTrue(result.ok)
@@ -1328,7 +1288,7 @@ TRIAL_KEY = "DEMO-7K3QM-P9XWD-R4TNB-H2CFY-M8LJV"
 
 
 class InAppTrialTests(ClientTestCase):
-    """start_trial (SPEC 9.7 "In-app trials"): POST /trial without a key."""
+    """start_trial: POST /trial without a key."""
 
     def _started(self, request, now, **overrides):
         payload = base_payload(request.body, "trial", True, "ok", "Your free trial has started.", server_time=now)
@@ -1370,12 +1330,10 @@ class InAppTrialTests(ClientTestCase):
         self.assertTrue(offline.is_trial)
         self.assertIsNone(offline.trial_key)
 
-    # Review finding 7: a trial answer would overwrite the device secret and lease of the license this device holds.
     PAID_SECRET = "dsk_" + "P4idL1c3" * 5 + "abc"
 
     def _assert_refused_locally(self, state):
         clock = FakeClock(1767225600)
-        # If anything were sent, the server would start a trial whose secret and lease replace the stored ones.
         server = self.start(lambda request: self._started(request, int(clock())))
         store = MemoryStore()
         store.save(PRODUCT_ID, state)
@@ -1397,7 +1355,6 @@ class InAppTrialTests(ClientTestCase):
     def test_refuses_locally_when_a_lease_is_stored(self):
         self._assert_refused_locally(StoredState(lease_token=make_lease(1767225600 + 7200, hwid=TEST_HWID)))
 
-    # Final sweep F-SDK-1: a failed store read is not "nothing stored"; the guard fails closed.
     def test_refuses_with_store_unavailable_when_the_store_cannot_be_read(self):
         clock = FakeClock(1767225600)
         server = self.start(lambda request: self._started(request, int(clock())))
@@ -1411,12 +1368,10 @@ class InAppTrialTests(ClientTestCase):
         self.assertIn("could not be read", result.message)
         self.assertIsNone(result.trial_key)
         self.assertEqual(server.requests, [])
-        # Readable again: the guard sees the paid license.
         self.assertFailure(client.start_trial(), Code.ALREADY_LICENSED)
         self.assertEqual(server.requests, [])
         self.assertEqual(store.load(PRODUCT_ID).device_secret, self.PAID_SECRET)
 
-    # Final sweep F-SDK-4: one "days left" rule in every SDK (CLIENT_PROTOCOL 5.2).
     def test_days_left_right_after_the_start_is_the_trial_length(self):
         start = 1767225600
         clock = FakeClock(start - 2)  # the local clock lags the signed serverTime by 2 s
@@ -1428,8 +1383,7 @@ class InAppTrialTests(ClientTestCase):
         self.assertEqual(trial.days_remaining(), 14)
         self.assertEqual(trial.days_remaining(now=start + 14 * 86400 - 1), 1)
         self.assertEqual(trial.days_remaining(now=start + 14 * 86400), 0)
-        # Offline: measured at the time of the check. The lease's license expires at exp + 30 days
-        # (mock_server.make_lease), i.e. 30 days and 3602 s after the check: 31 days left.
+        # make_lease sets licenseExpiresAt to exp + 30 days: 31 days left at the check.
         offline = self.make_client(server.url, store=store, clock=clock).validate_offline()
         self.assertTrue(offline.ok, offline)
         self.assertEqual(offline.days_remaining(), 31)
@@ -1437,7 +1391,6 @@ class InAppTrialTests(ClientTestCase):
     def test_refuses_locally_when_both_are_stored_and_starts_after_clearing(self):
         state = StoredState(device_secret=self.PAID_SECRET, lease_token=make_lease(1767225600 + 7200, hwid=TEST_HWID))
         client, server, store = self._assert_refused_locally(state)
-        # clear_stored_state() is the documented way out: then the trial starts normally.
         client.clear_stored_state()
         result = client.start_trial()
         self.assertTrue(result.ok, result)
@@ -1475,7 +1428,6 @@ class InAppTrialTests(ClientTestCase):
         self.assertFailure(result, Code.PANEL_TOO_OLD)
         self.assertIn("update the Velsigil panel", result.message)
         self.assertEqual(result.request_id, "rid-old")
-        # Only the trial endpoint maps a 404 like this; unknown_product keeps its code.
         self.assertEqual(client.validate(LICENSE_KEY).code, Code.INVALID_RESPONSE)
         server.handler = lambda request: Reply(404, {"error": {"code": "unknown_product"}})
         self.assertEqual(client.start_trial().code, Code.UNKNOWN_PRODUCT)
@@ -1544,22 +1496,20 @@ class _FlakyStore(MemoryStore):
 
 
 class SafetyTests(ClientTestCase):
-    # Final sweep F-SDK-1: an answer is never merged into a failed read's placeholder.
     def test_an_unreadable_store_is_never_overwritten_with_nothing(self):
         paid = "dsk_" + "P4idL1c3" * 5 + "abc"
         logic = LicenseServerLogic()
-        logic.secret_issued = True  # the device is known: the answer issues no new secret
+        logic.secret_issued = True  # the answer issues no new secret
         server = self.start(logic)
         store = _FlakyStore()
         store.save(PRODUCT_ID, StoredState(device_secret=paid))
-        store.failures, store.saves = -1, 0  # every load fails from now on; saves still work
+        store.failures, store.saves = -1, 0
         client = self.make_client(server.url, store=store)
         with self.assertLogs("velsigil_client", level="WARNING"):
             self.assertTrue(client.validate(LICENSE_KEY).ok)
         self.assertEqual(store.saves, 0)
         store.failures = 0
         self.assertEqual(store.load(PRODUCT_ID).device_secret, paid)
-        # A secret the server just issued belongs to a new activation: kept although the store is unreadable.
         logic.secret_issued = False
         store.failures = -1
         with self.assertLogs("velsigil_client", level="WARNING"):
@@ -1587,7 +1537,6 @@ class SafetyTests(ClientTestCase):
         with self.assertLogs("velsigil_client", level="WARNING"):
             self.assertTrue(client.validate(LICENSE_KEY).ok)
         self.assertTrue(client.validate(LICENSE_KEY).ok)
-        # The secret is kept in memory for this process even though saving failed.
         self.assertEqual(server.bodies("/validate")[1]["deviceSecret"], DEVICE_SECRET)
 
     def test_secrets_never_logged_or_repr(self):
@@ -1639,7 +1588,7 @@ class SafetyTests(ClientTestCase):
         self.assertTrue(all(b.get("deviceSecret") == DEVICE_SECRET for b in bodies[1:]))
 
 
-#: A "real" product key for clients on non-loopback URLs, which refuse the published vector keys.
+#: A random product key for non-loopback URLs, where the vector keys are refused.
 PRODUCT_KEY = ms.generate_public_key_b64()
 
 
@@ -1720,18 +1669,17 @@ class PublishedTestKeyTests(unittest.TestCase):
 
     @staticmethod
     def encodings(key):
-        """Other accepted spellings of the same 32 bytes: unpadded, surrounded by whitespace and, when
-        the decoder accepts it, non-canonical base64 (the 2 unused low bits of the last character set)."""
+        """Other accepted spellings of the same key bytes, including non-canonical base64."""
         spellings = [key, key.rstrip("="), "  " + key + "\n", " " + key.rstrip("=") + "\t"]
         alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         body = key.rstrip("=")
         non_canonical = body[:-1] + alphabet[alphabet.index(body[-1]) ^ 1] + "="
         try:
-            # The internal decoder: the public decode_public_key refuses the test keys themselves.
+            # Internal decoder: the public one refuses the test keys.
             if _decode_public_key(non_canonical) == _decode_public_key(key):
                 spellings.append(non_canonical)
         except ConfigurationError:
-            pass  # a stricter decoder refuses it outright: not an accepted spelling
+            pass
         return tuple(spellings)
 
     def make(self, url, key, **options):
@@ -1755,14 +1703,12 @@ class PublishedTestKeyTests(unittest.TestCase):
                         self.assertEqual(str(caught.exception), self.MESSAGE)
                         self.assertEqual(caught.exception.code, Code.INVALID_CONFIGURATION)
                         self.assertIsInstance(caught.exception, ValueError)
-                # allow_insecure_http permits plain HTTP, never the test keys.
                 with self.subTest(key=spelling, url="http (allow_insecure_http)"):
                     with self.assertRaises(ConfigurationError) as caught:
                         self.make("http://licenses.example.com", spelling, allow_insecure_http=True)
                     self.assertEqual(str(caught.exception), self.MESSAGE)
 
     def test_refusal_takes_the_invalid_public_key_path(self):
-        # Same exception type (and code) the constructor raises for a malformed public key.
         with self.assertRaises(ConfigurationError) as bad_key:
             self.make("https://licenses.example.com", "short")
         with self.assertRaises(ConfigurationError) as test_key:
@@ -1788,13 +1734,12 @@ class PublishedTestKeyTests(unittest.TestCase):
                         self.assertEqual(client.key_id, hashlib.sha256(_decode_public_key(key)).hexdigest()[:16])
 
     def test_loopback_exemption_is_the_plain_http_rule(self):
-        # One helper decides both: every host that may use plain HTTP may use the test keys, and no other.
         for host in sorted(client_module.LOCAL_HOSTS):
             netloc = "[%s]" % host if ":" in host else host
             for scheme in ("http", "https"):
                 with self.subTest(host=host, scheme=scheme):
                     self.make("%s://%s:3000" % (scheme, netloc), self.TEST_KEYS[0])
-        # https, so the plain-HTTP rule (the same helper) cannot be what refuses it: the guard must.
+        # https, so only the test-key guard can refuse it.
         with mock.patch.object(client_module, "_is_local_host", return_value=False):
             with self.assertRaises(ConfigurationError) as caught:
                 self.make("https://localhost:3000", self.TEST_KEYS[0])
@@ -1812,9 +1757,6 @@ class PublishedTestKeyTests(unittest.TestCase):
                 self.assertEqual(client.api_url, "https://licenses.example.com/api/client/v1")
 
     def test_low_level_helpers_refuse_test_keys_even_where_the_client_allows_them(self):
-        # The helpers have no URL, so they refuse the test keys unconditionally: a loopback client may use one,
-        # but not even its own (internal) verifier passes the public helpers. Full coverage of the helpers:
-        # tests/test_vectors.py PublishedTestKeyHelperTests.
         lease = make_lease(int(time.time()) + 3600)
         for key in self.TEST_KEYS:
             client = self.make("http://127.0.0.1:3000", key)
@@ -1844,7 +1786,7 @@ class FileStoreTests(unittest.TestCase):
             reopened = FileStore(path)
             self.assertEqual(reopened.load(PRODUCT_ID), StoredState(DEVICE_SECRET, "a.b"))
             self.assertEqual(reopened.load(other), StoredState(None, "c.d"))
-            self.assertEqual(os.listdir(os.path.dirname(path)), ["license.json"])  # no temp files left
+            self.assertEqual(os.listdir(os.path.dirname(path)), ["license.json"])
             if os.name == "posix":
                 self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode), 0o700)
@@ -1886,14 +1828,12 @@ class FileStoreTests(unittest.TestCase):
                 self.assertEqual(store.load(PRODUCT_ID), StoredState(DEVICE_SECRET, "old.lease"))
                 self.assertFalse(os.path.exists(path))
 
-                # The next write goes to the new path and carries every product over.
                 store.save(PRODUCT_ID, StoredState(DEVICE_SECRET, "new.lease"))
                 self.assertTrue(os.path.isfile(path))
                 reopened = FileStore(path)
                 self.assertEqual(reopened.load(PRODUCT_ID), StoredState(DEVICE_SECRET, "new.lease"))
                 self.assertEqual(reopened.load(other), StoredState(None, "c.d"))
 
-                # Once the new file exists the legacy one is never consulted again.
                 reopened.delete(PRODUCT_ID)
                 self.assertTrue(FileStore(path).load(PRODUCT_ID).is_empty)
 
@@ -1905,8 +1845,6 @@ class FileStoreTests(unittest.TestCase):
                 json.dump({"version": 1, "products": {PRODUCT_ID: {"deviceSecret": DEVICE_SECRET}}}, handle)
             self.assertTrue(FileStore(os.path.join(tmp, "custom", "license.json")).load(PRODUCT_ID).is_empty)
 
-    # Final sweep F-SDK-5: two FileStore objects on one path (e.g. one per product, both on
-    # default_store_path()) must not lose each other's updates of the shared document.
     def test_instances_on_the_same_path_share_one_lock(self):
         other = "7c3e9a10-1b2c-4d5e-8f90-a1b2c3d4e5f6"
         with tempfile.TemporaryDirectory() as tmp:
@@ -1918,7 +1856,7 @@ class FileStoreTests(unittest.TestCase):
             def slow_read():
                 products = original_read()
                 read_done.set()
-                release.wait(5)  # hold the read-modify-write open while the other instance saves
+                release.wait(5)  # hold the read-modify-write open
                 return products
 
             first._read_all = slow_read

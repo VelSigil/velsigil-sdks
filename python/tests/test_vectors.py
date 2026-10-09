@@ -1,4 +1,4 @@
-"""Classify every vector in sdks/test-vectors.json (SPEC 10.7)."""
+"""Classify every vector in sdks/test-vectors.json."""
 
 from __future__ import annotations
 
@@ -38,16 +38,14 @@ from velsigil_client import client as client_module, crypto, hwid  # noqa: E402
 
 VECTORS = ms.VECTORS
 
-# The private keys of the vector keys are published, so the public helpers (Ed25519Verifier, open_envelope,
-# verify_lease, key_id_for) refuse them on any host (test_client.PublishedTestKeyTests). The vector suite
-# verifies through the SDK's internal, unguarded equivalents, which the client itself uses.
+# The public helpers refuse the published test keys, so the vectors use the internal paths.
 vector_verifier = crypto._new_verifier
 open_vector_envelope = crypto._open_envelope
 verify_vector_lease = crypto._verify_lease
 
 
 def classify_envelope(verifier, vector, hwid=None):
-    """``hwid``: the device the request was sent for (default: the vector's ``hwid``, if any)."""
+    """``hwid`` defaults to the vector's own ``hwid``, if any."""
     try:
         payload = open_vector_envelope(
             verifier,
@@ -92,10 +90,8 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(raw).hexdigest()[:16], VECTORS["keys"]["keyId"])
 
     def test_public_key_parsing(self):
-        # One parser behind the public helpers (a real key) and the internal path (the vector key).
         for key, make in ((ms.generate_public_key_b64(), Ed25519Verifier), (VECTORS["keys"]["publicKey"], vector_verifier)):
             raw = base64.b64decode(key)
-            # missing padding and surrounding whitespace are tolerated
             self.assertEqual(make(key.rstrip("=")).public_key_bytes, raw)
             self.assertEqual(make("  " + key + "\n").public_key_bytes, raw)
             for bad in ("", "not base64!", "AAAA", key[:-8], key + "AAAA", None):
@@ -120,7 +116,6 @@ class KeyTests(unittest.TestCase):
                 vector_verifier(key, backend="cryptography")
             with self.assertRaises(CryptoBackendError):
                 Ed25519Verifier(ms.generate_public_key_b64(), backend="cryptography")
-            # "auto" falls through to PyNaCl; without it, construction fails closed.
             with mock.patch.object(crypto, "_nacl_verifier", unavailable):
                 with self.assertRaises(CryptoBackendError):
                     vector_verifier(key)
@@ -131,9 +126,7 @@ class KeyTests(unittest.TestCase):
 
 
 class PublishedTestKeyHelperTests(unittest.TestCase):
-    """The vector keys' private seeds are published. The public low-level helpers have no server URL, so
-    they refuse both keys on any host, with the client constructor's error and message; only the internal
-    path (the client's, and this suite's) accepts them."""
+    """The public helpers refuse both published test keys on any host."""
 
     MESSAGE = (
         "This is the public test key from the Velsigil SDK test vectors, whose private key is published: "
@@ -145,8 +138,7 @@ class PublishedTestKeyHelperTests(unittest.TestCase):
 
     @staticmethod
     def spellings(key):
-        """Accepted spellings of the same 32 bytes: unpadded, surrounded by whitespace and, when the decoder
-        accepts it, non-canonical base64 (the 2 unused low bits of the last character set)."""
+        """Other accepted spellings of the same key bytes, including non-canonical base64."""
         body = key.rstrip("=")
         alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         non_canonical = body[:-1] + alphabet[alphabet.index(body[-1]) ^ 1] + "="
@@ -155,7 +147,7 @@ class PublishedTestKeyHelperTests(unittest.TestCase):
             if crypto._decode_public_key(non_canonical) == crypto._decode_public_key(key):
                 spellings.append(non_canonical)
         except ConfigurationError:
-            pass  # a stricter decoder refuses it outright: not an accepted spelling
+            pass
         return spellings
 
     def assertRefused(self, call):
@@ -166,7 +158,6 @@ class PublishedTestKeyHelperTests(unittest.TestCase):
         self.assertIsInstance(caught.exception, ValueError)
 
     def test_constant_matches_the_vectors_file(self):
-        # Defined in client.py (the SDK's one guard file for these keys) and used by the crypto helpers.
         self.assertEqual(client_module._PUBLISHED_TEST_PUBLIC_KEYS, {base64.b64decode(key) for key, _ in self.KEYS})
         self.assertFalse(hasattr(crypto, "_PUBLISHED_TEST_PUBLIC_KEYS"))
 
@@ -182,7 +173,6 @@ class PublishedTestKeyHelperTests(unittest.TestCase):
                     self.assertRefused(lambda: crypto.decode_public_key(spelling))
 
     def test_refusal_is_the_invalid_key_error(self):
-        # The exception type and code each helper raises for a malformed public key.
         for helper in (Ed25519Verifier, key_id_for, crypto.decode_public_key):
             with self.subTest(helper=helper.__name__):
                 with self.assertRaises(ConfigurationError) as bad_key:
@@ -193,7 +183,6 @@ class PublishedTestKeyHelperTests(unittest.TestCase):
                 self.assertEqual(test_key.exception.code, bad_key.exception.code)
 
     def test_verification_helpers_refuse_a_verifier_holding_a_test_key(self):
-        # Such a verifier exists only on the internal path (the client's, for a loopback api_url).
         vector = {v["name"]: v for v in VECTORS["envelopes"]}["validate_ok"]
         for key, seed in self.KEYS:
             with self.subTest(key=key):
@@ -201,11 +190,9 @@ class PublishedTestKeyHelperTests(unittest.TestCase):
                 envelope = ms.sign_envelope(vector["payload"], seed)
                 args = (envelope, vector["requestNonce"], vector["productId"], vector["requestType"])
                 token = ms.make_lease(self.NOW + 3600, seed_b64=seed)
-                # The internal path verifies what this key signed ...
                 self.assertEqual(open_vector_envelope(verifier, *args), vector["payload"])
                 claims = verify_vector_lease(verifier, token, ms.PRODUCT_ID, ms.TEST_HWID, self.NOW)
                 self.assertEqual(claims["exp"], self.NOW + 3600)
-                # ... the public helpers refuse the verifier before looking at anything else.
                 self.assertRefused(lambda: open_envelope(verifier, *args))
                 self.assertRefused(lambda: open_envelope(verifier, *args, expected_hwid=ms.TEST_HWID))
                 self.assertRefused(lambda: open_envelope(verifier, None, "n", "p", None))  # type: ignore[arg-type]
@@ -213,7 +200,6 @@ class PublishedTestKeyHelperTests(unittest.TestCase):
                 self.assertRefused(lambda: verify_lease(verifier, "not a lease", ms.PRODUCT_ID, ms.TEST_HWID, self.NOW))
 
     def test_internal_path_verifies_the_vectors(self):
-        # The whole vector suite runs on it; spot-check it here next to the refusals.
         verifier = vector_verifier(VECTORS["keys"]["publicKey"])
         by_name = {v["name"]: v for v in VECTORS["envelopes"]}
         self.assertEqual(classify_envelope(verifier, by_name["validate_ok"]), ("valid", by_name["validate_ok"]["payload"]))
@@ -248,7 +234,7 @@ class PublishedTestKeyHelperTests(unittest.TestCase):
         vector = {v["name"]: v for v in VECTORS["envelopes"]}["validate_ok"]
         args = (vector["requestNonce"], vector["productId"], vector["requestType"])
         self.assertEqual(open_envelope(verifier, ms.sign_envelope(vector["payload"], seed), *args), vector["payload"])
-        with self.assertRaises(EnvelopeError) as caught:  # signed with the vector key, not this one
+        with self.assertRaises(EnvelopeError) as caught:
             open_envelope(verifier, vector["envelope"], *args)
         self.assertEqual(caught.exception.reason, "invalid_signature")
         token = ms.make_lease(self.NOW + 3600, seed_b64=seed)
@@ -268,8 +254,6 @@ class EnvelopeVectorTests(unittest.TestCase):
                         self.assertEqual(payload, vector["payload"])
 
     def test_device_binding_vectors_are_authentic(self):
-        # LIC-4: these envelopes carry valid signatures for the right nonce and product; only the
-        # binding of their lease / activation.hwidHash to the requesting hwid rejects them.
         verifier = vector_verifier(VECTORS["keys"]["publicKey"])
         bound = [v for v in VECTORS["envelopes"] if v["expect"] == "hwid_mismatch"]
         self.assertEqual(
@@ -293,7 +277,6 @@ class EnvelopeVectorTests(unittest.TestCase):
         self.assertEqual(by_name["validate_ok"]["hwid"], ms.TEST_HWID)
 
     def test_server_encoding_and_signing_reproduce_valid_vectors(self):
-        # Proves the mock server signs exactly like the real one.
         for vector in VECTORS["envelopes"]:
             if vector["expect"] != "valid":
                 continue
@@ -355,8 +338,6 @@ class EnvelopeVectorTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
 
     def test_type_mismatch_vector_is_authentic(self):
-        # SDK-1: a signed update-check answer (ok: true, no license involved) for this request's nonce
-        # and product must not pass as the answer to a (device-bound) validate request.
         verifier = vector_verifier(VECTORS["keys"]["publicKey"])
         vector = {v["name"]: v for v in VECTORS["envelopes"]}["type_mismatch"]
         self.assertEqual(vector["requestType"], "validate")
@@ -426,7 +407,7 @@ class LeaseVectorTests(unittest.TestCase):
 
 
 class FreeTrialVectorTests(unittest.TestCase):
-    """SPEC 9.7: the optional signed ``trial`` field, ``trial_already_used`` and unknown fields."""
+    """The optional signed ``trial`` field, ``trial_already_used`` and unknown fields."""
 
     def setUp(self):
         self.verifier = vector_verifier(VECTORS["keys"]["publicKey"])
@@ -437,7 +418,6 @@ class FreeTrialVectorTests(unittest.TestCase):
         outcome, payload = classify_envelope(self.verifier, self.by_name["validate_ok_trial"])
         self.assertEqual(outcome, "valid")
         self.assertTrue(LicenseInfo.from_payload(payload["license"], granted=True).is_trial)
-        # Paid licenses carry no trial field at all.
         outcome, payload = classify_envelope(self.verifier, self.by_name["validate_ok"])
         self.assertNotIn("trial", payload["license"])
         self.assertFalse(LicenseInfo.from_payload(payload["license"]).is_trial)
@@ -469,7 +449,6 @@ class FreeTrialVectorTests(unittest.TestCase):
             LicenseInfo.from_payload(license_obj)
 
     def test_trial_conversion_reference(self):
-        """SPEC 9.7: ``license.trialRef`` on convertible trials (also license_expired); the "Buy now" link."""
         from velsigil_client import TRIAL_REF_PARAM, with_trial_ref
         from velsigil_client.client import _result_from_payload
 
@@ -486,11 +465,9 @@ class FreeTrialVectorTests(unittest.TestCase):
         expired = _result_from_payload(classify_envelope(self.verifier, self.by_name["license_expired_trial_ref"])[1])
         self.assertFalse(expired.ok)
         self.assertEqual(expired.code, "license_expired")
-        # Without the field (paid licenses, older servers): None, and links stay unchanged.
         plain = _result_from_payload(classify_envelope(self.verifier, self.by_name["validate_ok_trial"])[1])
         self.assertIsNone(plain.trial_ref)
         self.assertEqual(plain.with_trial_ref("https://shop.example.com/buy"), "https://shop.example.com/buy")
-        # The link builder.
         ref = self.by_name["validate_ok_trial_ref"]["payload"]["license"]["trialRef"]
         self.assertEqual(TRIAL_REF_PARAM, "velsigil_trial")
         self.assertEqual(with_trial_ref("https://shop.example.com/buy?plan=pro#top", ref), "https://shop.example.com/buy?plan=pro&velsigil_trial=" + ref + "#top")
@@ -498,7 +475,6 @@ class FreeTrialVectorTests(unittest.TestCase):
         self.assertEqual(with_trial_ref("https://buy.stripe.com/test_abc", ref), "https://buy.stripe.com/test_abc?client_reference_id=" + ref)
         self.assertEqual(with_trial_ref("mailto:sales@example.com", ref), "mailto:sales@example.com")
         self.assertEqual(with_trial_ref("https://shop.example.com/buy", "has space"), "https://shop.example.com/buy")
-        # Malformed values make the payload malformed.
         for bad in (42, "", "has space", "x" * 201, "ünicode"):
             with self.subTest(bad=bad):
                 license_obj = dict(self.by_name["validate_ok_trial"]["payload"]["license"], trialRef=bad)
@@ -507,7 +483,7 @@ class FreeTrialVectorTests(unittest.TestCase):
 
 
 class InAppTrialVectorTests(unittest.TestCase):
-    """SPEC 9.7 "In-app trials": answers of type ``trial`` and the key of a started trial."""
+    """Answers of type ``trial`` and the key of a started trial."""
 
     def setUp(self):
         self.verifier = vector_verifier(VECTORS["keys"]["publicKey"])
@@ -576,7 +552,7 @@ class HwidTests(unittest.TestCase):
     def test_current_machine(self):
         try:
             value = hwid.get_hardware_id()
-        except HardwareIdError as exc:  # e.g. minimal containers without machine-id
+        except HardwareIdError as exc:
             self.skipTest("no machine id on this host: %s" % exc)
         self.assertRegex(value, r"^[0-9a-f]{64}$")
         self.assertEqual(value, hwid.get_hardware_id())
@@ -598,7 +574,6 @@ class HwidTests(unittest.TestCase):
                 with self.assertRaises(HardwareIdError):
                     hwid.read_machine_id("linux")
 
-    # Final sweep F-SDK-3: systemd's placeholder is not a machine id (the same rule in every SDK).
     def test_linux_machine_id_placeholder_is_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
             first = os.path.join(tmp, "machine-id")

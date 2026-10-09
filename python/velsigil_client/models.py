@@ -1,10 +1,4 @@
-"""Immutable result objects returned by :class:`~velsigil_client.VelsigilClient`.
-
-All timestamps are unix seconds (UTC), exactly as signed by the server.
-The ``from_payload`` constructors are strict: a signed payload with
-unexpected field types raises :class:`ValueError`, which the client turns
-into an ``invalid_response`` result (fail closed).
-"""
+"""Immutable result objects; timestamps are unix seconds as signed by the server."""
 
 from __future__ import annotations
 
@@ -15,11 +9,6 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Tuple
 
 from .crypto import as_int
-
-
-# --------------------------------------------------------------------------- #
-# Strict field readers
-# --------------------------------------------------------------------------- #
 
 
 def _obj(value: Any, name: str) -> Mapping[str, Any]:
@@ -65,7 +54,6 @@ def _bool(obj: Mapping[str, Any], key: str) -> bool:
 
 
 def _opt_flag(obj: Mapping[str, Any], key: str) -> bool:
-    """An optional boolean field: absent or null -> ``False``; any other non-boolean is malformed."""
     value = obj.get(key)
     if value is None:
         return False
@@ -74,7 +62,7 @@ def _opt_flag(obj: Mapping[str, Any], key: str) -> bool:
     return value
 
 
-#: URL parameter (and Paddle custom-data key / FastSpring tag) that carries a trial conversion reference (SPEC 9.7).
+#: URL parameter (also the Paddle custom-data key and FastSpring tag) for the trial reference.
 TRIAL_REF_PARAM = "velsigil_trial"
 _STRIPE_PAYMENT_LINK_HOST = "buy.stripe.com"
 _STRIPE_REFERENCE_PARAM = "client_reference_id"
@@ -82,12 +70,10 @@ _TRIAL_REF_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 
 
 def _is_trial_ref(value: Any) -> bool:
-    """1-200 characters of ``[A-Za-z0-9_-]`` (safe in a URL without encoding)."""
     return isinstance(value, str) and 1 <= len(value) <= 200 and all(c in _TRIAL_REF_CHARS for c in value)
 
 
 def _opt_trial_ref(obj: Mapping[str, Any]) -> Optional[str]:
-    """The optional signed ``trialRef`` (SPEC 9.7): absent/null -> ``None``; anything else malformed raises."""
     value = obj.get("trialRef")
     if value is None:
         return None
@@ -97,14 +83,7 @@ def _opt_trial_ref(obj: Mapping[str, Any]) -> Optional[str]:
 
 
 def with_trial_ref(url: str, trial_ref: Optional[str]) -> str:
-    """``url`` with a trial conversion reference appended (SPEC 9.7).
-
-    Adds ``velsigil_trial=<ref>`` to the query (before any ``#fragment``; the
-    rest of the URL is kept as it is), or ``client_reference_id=<ref>`` for a
-    Stripe Payment Link (``https://buy.stripe.com/...``). Returns ``url``
-    unchanged when the reference is missing or malformed, or ``url`` is not an
-    absolute http(s) URL.
-    """
+    """Add the trial reference to a "Buy now" URL so the purchase converts this trial."""
     if not _is_trial_ref(trial_ref) or not isinstance(url, str):
         return url
     lower = url.lower()
@@ -155,23 +134,9 @@ def _now(now: Optional[float]) -> float:
     return time.time() if now is None else now
 
 
-# --------------------------------------------------------------------------- #
-# Payload objects
-# --------------------------------------------------------------------------- #
-
-
 @dataclass(frozen=True)
 class LicenseInfo:
-    """License details from a signed response (or from an offline lease).
-
-    Fields the offline lease does not carry (``max_devices``, ``devices_used``,
-    ``created_at``) are ``None`` for offline results.
-
-    ``features`` is informational on a failed result (a denial such as
-    ``license_revoked``): gate paid features with
-    :meth:`VelsigilResult.has_feature`, which is ``False`` unless the result
-    is ``ok``. :meth:`has_feature` here is gated the same way.
-    """
+    """License details; gate features with :meth:`VelsigilResult.has_feature`."""
 
     id: str
     plan: str
@@ -181,16 +146,10 @@ class LicenseInfo:
     max_devices: Optional[int] = None
     devices_used: Optional[int] = None
     created_at: Optional[int] = None
-    #: ``True`` only when this came from an ``ok`` signed response or a valid
-    #: offline lease (set by the SDK; a hand-made instance grants nothing).
+    #: Set by the SDK for an ``ok`` result; a hand-made instance grants nothing.
     granted: bool = field(default=False, repr=False, compare=False)
-    #: ``True`` for a free-trial license (SPEC 9.7): the optional signed
-    #: ``trial`` field of the response or of the offline lease. Absent (paid
-    #: licenses, older servers) means ``False``.
     is_trial: bool = False
-    #: The trial's conversion reference (SPEC 9.7, servers since 2026-10-06):
-    #: set for a free trial a purchase can still convert, ``None`` otherwise
-    #: (paid licenses, offline leases, older servers). Opaque.
+    #: See :attr:`VelsigilResult.trial_ref`.
     trial_ref: Optional[str] = None
 
     @classmethod
@@ -221,12 +180,7 @@ class LicenseInfo:
         return _to_datetime(self.expires_at)
 
     def has_feature(self, name: str) -> bool:
-        """``True`` only for a license from an ``ok`` result (or a valid offline
-        lease) whose status is ``active`` or ``pending`` and that lists ``name``.
-
-        A denial (revoked, banned, suspended, expired, ...) never unlocks a
-        feature, even when an older server still listed the plan's features.
-        """
+        """``True`` only for a granted, active or pending license that lists ``name``."""
         return self.granted and self.status in ("active", "pending") and name in self.features
 
     def seconds_remaining(self, now: Optional[float] = None) -> Optional[float]:
@@ -241,12 +195,7 @@ class LicenseInfo:
 
 @dataclass(frozen=True)
 class ActivationInfo:
-    """The server-side device record for this machine.
-
-    The device secret itself is never exposed here; the client persists it in
-    its store. ``device_secret_issued`` tells you a new secret arrived with
-    this response.
-    """
+    """The server-side device record; the device secret itself is never exposed."""
 
     id: str
     status: str
@@ -308,12 +257,7 @@ class UpdateInfo:
 
 @dataclass(frozen=True)
 class DownloadInfo:
-    """A short-lived download link for a release.
-
-    ``url`` embeds a bearer token valid for a few minutes, so it is excluded
-    from ``repr`` to keep it out of logs. ``size`` and ``sha256`` are signed by
-    the server; :meth:`VelsigilClient.download_to_file` enforces both.
-    """
+    """A short-lived download link; ``url`` holds a bearer token, so it is kept out of ``repr``."""
 
     url: str = field(repr=False)
     expires_at: int
@@ -341,19 +285,9 @@ class DownloadInfo:
         )
 
 
-# --------------------------------------------------------------------------- #
-# Result
-# --------------------------------------------------------------------------- #
-
-
 @dataclass(frozen=True)
 class VelsigilResult:
-    """Outcome of a client call. Request methods never raise; check ``ok``.
-
-    ``ok`` can only be ``True`` when it came from a response whose Ed25519
-    signature, nonce and product id were verified, or from a verified offline
-    lease (``offline=True``).
-    """
+    """Outcome of a client call; ``ok`` is ``True`` only for a verified answer or lease."""
 
     ok: bool
     code: str
@@ -367,26 +301,12 @@ class VelsigilResult:
     offline: bool = False
     server_time: Optional[int] = None
     http_status: Optional[int] = None
-    #: Seconds to wait before trying the server again (0..86400), from the
-    #: ``Retry-After`` header of an HTTP 429 or 503 answer, whatever code it
-    #: maps to: ``rate_limited``, ``network_error`` (the server's empty 503
-    #: while its database is unreachable, or a gateway's 503) or the code of
-    #: a Velsigil error body (503 ``service_busy`` -> ``internal_error``).
-    #: :meth:`VelsigilClient.validate_with_offline_fallback` copies it to the
-    #: offline result it falls back to. ``None`` for every other answer and
-    #: when the header is absent or unparseable.
+    #: Seconds from the server's ``Retry-After`` on a 429 or 503 (capped at one day).
     retry_after: Optional[int] = None
-    #: The license key of the free trial :meth:`VelsigilClient.start_trial`
-    #: just started (``ok`` results of ``start_trial`` only; otherwise
-    #: ``None``). The server sends it once and can never send it again: store
-    #: it right away, like a key the user typed. Kept out of ``repr``.
+    #: Key of the trial ``start_trial`` just started. The server sends it only once; store it.
     trial_key: Optional[str] = field(default=None, repr=False)
-    #: Unix time the result refers to when it has no ``server_time``
-    #: (offline results: the time of the check, local clock plus the learned
-    #: server offset). The default ``now`` of :meth:`days_remaining`.
+    #: Time of an offline check, used by :meth:`days_remaining` when there is no ``server_time``.
     reference_time: Optional[float] = field(default=None, repr=False, compare=False)
-
-    # -- features -------------------------------------------------------------
 
     @property
     def features(self) -> Tuple[str, ...]:
@@ -398,8 +318,6 @@ class VelsigilResult:
     def has_feature(self, name: str) -> bool:
         """``True`` only for an ``ok`` result whose license includes ``name``."""
         return self.ok and self.license is not None and name in self.license.features
-
-    # -- expiry helpers -------------------------------------------------------
 
     @property
     def expires_at(self) -> Optional[int]:
@@ -417,24 +335,12 @@ class VelsigilResult:
 
     @property
     def is_trial(self) -> bool:
-        """``True`` when the license is a free trial (SPEC 9.7), online or offline.
-
-        A purchase with the same e-mail address keeps the key; this turns
-        ``False`` with the next online validation.
-        """
+        """``True`` for a free trial; turns ``False`` on the next online validation after a purchase."""
         return self.license is not None and self.license.is_trial
 
     @property
     def trial_ref(self) -> Optional[str]:
-        """The current trial's conversion reference (SPEC 9.7), or ``None``.
-
-        Present on online results for a free trial a purchase can still
-        convert, also on ``license_expired`` (the moment to offer "Buy now").
-        Add it to the "Buy now" link with :meth:`with_trial_ref`: the purchase
-        then converts THIS trial into the paid license (same key) whatever
-        e-mail address the buyer pays with. A fresh one comes with every
-        answer; offline results have none.
-        """
+        """The trial's conversion reference for the "Buy now" link, or ``None`` (always offline)."""
         return self.license.trial_ref if self.license is not None else None
 
     def with_trial_ref(self, buy_url: str) -> str:
@@ -446,14 +352,7 @@ class VelsigilResult:
         return self.license.seconds_remaining(now) if self.license is not None else None
 
     def days_remaining(self, now: Optional[float] = None) -> Optional[int]:
-        """Days until license expiry, rounded up; ``None`` for lifetime/unknown.
-
-        The "days left" rule of CLIENT_PROTOCOL 5.2, the same in every
-        Velsigil SDK. Without ``now`` it measures at the result's own time:
-        the signed ``server_time`` of an online answer, the time of the check
-        for an offline result. So right after ``start_trial`` of an N-day
-        trial it is N; it is 1 throughout the last day and 0 once expired.
-        """
+        """Days until expiry, rounded up, measured at the result's own time by default."""
         if now is None:
             now = self.server_time if self.server_time is not None else self.reference_time
         seconds = self.seconds_remaining(now)

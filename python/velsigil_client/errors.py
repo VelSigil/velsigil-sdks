@@ -1,12 +1,4 @@
-"""Exceptions and result codes used by the Velsigil client.
-
-Request methods on :class:`~velsigil_client.VelsigilClient` never raise for
-license or transport failures; they return a result whose ``code`` is one of
-the values in :class:`Code`. Exceptions are reserved for programmer and
-environment errors (invalid constructor arguments, no Ed25519 backend, no
-hardware id) and for the low-level verification helpers in
-:mod:`velsigil_client.crypto`, which report *why* a signed object was rejected.
-"""
+"""Exceptions and result codes; client requests return codes rather than raising."""
 
 from __future__ import annotations
 
@@ -14,9 +6,8 @@ from typing import FrozenSet
 
 
 class Code:
-    """Result codes (SPEC section 10.3 plus SDK-side codes)."""
+    """Result codes from the server and the SDK."""
 
-    # --- signed server codes -------------------------------------------------
     OK = "ok"
     INVALID_KEY = "invalid_key"
     LICENSE_EXPIRED = "license_expired"
@@ -40,65 +31,42 @@ class Code:
     REPLAY_DETECTED = "replay_detected"
     NO_RELEASE = "no_release"
     RELEASE_NOT_FOUND = "release_not_found"
-    #: Free trials (SPEC 9.7): this device already used a free trial of the
-    #: product. A signed failure that keeps the stored lease.
     TRIAL_ALREADY_USED = "trial_already_used"
-    #: In-app free trials (``start_trial``, SPEC 9.7): signed failures, none
-    #: lease-revoking. ``TRIAL_CONFIRMATION_SENT`` means the offer confirms an
-    #: e-mail address first: the key arrives by e-mail.
     TRIAL_UNAVAILABLE = "trial_unavailable"
     TRIAL_EMAIL_REQUIRED = "trial_email_required"
     TRIAL_EMAIL_INVALID = "trial_email_invalid"
     TRIAL_EMAIL_NOT_ACCEPTED = "trial_email_not_accepted"
+    #: The trial key arrives by e-mail once the user confirms their address.
     TRIAL_CONFIRMATION_SENT = "trial_confirmation_sent"
 
-    # --- unsigned HTTP error codes (can never produce ok=True) ----------------
     VALIDATION_ERROR = "validation_error"
     IP_BLOCKED = "ip_blocked"
     UNKNOWN_PRODUCT = "unknown_product"
     RATE_LIMITED = "rate_limited"
-    #: Unsigned 5xx (also 502/503/504 with a Velsigil error body, e.g. while
-    #: the server's database is down). On any unsigned 5xx (``http_status``
-    #: 500-599) ``validate_with_offline_fallback`` uses the stored lease.
     INTERNAL_ERROR = "internal_error"
     PAYLOAD_TOO_LARGE = "payload_too_large"
     UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
 
-    # --- SDK-side codes (SPEC 14; identical names in every Velsigil SDK) -----
-    #: Unsigned 200, bad signature, nonce/productId/type mismatch, a signed lease or activation of
-    #: another device, malformed or oversized response, redirect.
+    #: Untrusted answer: unsigned 200, bad signature, mismatch, redirect or oversized.
     INVALID_RESPONSE = "invalid_response"
-    #: No HTTP response (DNS, connect, TLS, timeout) or a 502/503/504 without a Velsigil error body.
-    #: ``validate_with_offline_fallback`` uses the stored lease on it and on any other unsigned 5xx.
+    #: No HTTP response, or a gateway 502/503/504 without a Velsigil error body.
     NETWORK_ERROR = "network_error"
-    #: :class:`ConfigurationError` code (constructor arguments rejected).
     INVALID_CONFIGURATION = "invalid_configuration"
-    #: ``validate_offline`` codes. ``validate_with_offline_fallback`` returns ``lease_expired`` /
-    #: ``lease_invalid`` when it falls back to an unusable stored lease; with no lease stored it
-    #: returns the original online failure instead of ``no_lease``.
     NO_LEASE = "no_lease"
     LEASE_EXPIRED = "lease_expired"
     LEASE_INVALID = "lease_invalid"
-    #: :class:`DownloadError` codes (``download_to_file``).
     DOWNLOAD_FAILED = "download_failed"
     INTEGRITY_MISMATCH = "integrity_mismatch"
     IO_ERROR = "io_error"
-    #: ``start_trial`` reached a Velsigil server without the in-app trial
-    #: endpoint (HTTP 404 with the error code ``not_found``): update the panel.
+    #: The server has no in-app trial endpoint; the seller must update the panel.
     PANEL_TOO_OLD = "panel_too_old"
-    #: ``start_trial`` refused locally: a device secret or an offline lease is
-    #: already stored for the product (this device holds a license; a trial
-    #: must not replace it). Nothing is sent and the stored state is untouched.
+    #: ``start_trial`` refused locally: this device already stores a license.
     ALREADY_LICENSED = "already_licensed"
-    #: ``start_trial`` refused locally: the store could not be read, so it
-    #: cannot tell whether this device already holds a license (a failed
-    #: read is never "nothing stored"). Nothing is sent; try again later.
+    #: ``start_trial`` refused locally: the store could not be read.
     STORE_UNAVAILABLE = "store_unavailable"
-    # ``VALIDATION_ERROR`` (above) is also returned for local argument checks.
 
 
-#: Error codes the server may return in an *unsigned* error body. Any other
-#: code found in an unsigned body is ignored (the body is attacker-controllable).
+#: Unsigned bodies are attacker-controllable, so any other code in one is ignored.
 UNSIGNED_ERROR_CODES: FrozenSet[str] = frozenset(
     {
         Code.VALIDATION_ERROR,
@@ -117,10 +85,7 @@ class VelsigilError(Exception):
 
 
 class ConfigurationError(VelsigilError, ValueError):
-    """Invalid client configuration (URL, product id, public key, options).
-
-    ``code`` is always ``"invalid_configuration"`` (the cross-SDK code).
-    """
+    """Invalid client configuration (URL, product id, public key, options)."""
 
     code = Code.INVALID_CONFIGURATION
 
@@ -138,14 +103,7 @@ class StoreError(VelsigilError):
 
 
 class DownloadError(VelsigilError):
-    """A release download failed or did not match its signed size/SHA-256.
-
-    ``code`` is one of the cross-SDK codes ``download_failed`` (non-200
-    status, e.g. an expired link, or a URL rejected by the HTTPS policy),
-    ``integrity_mismatch`` (size or SHA-256 differs from the signed values),
-    ``io_error`` (the destination could not be written), ``network_error``
-    (transport failure) or ``validation_error`` (bad arguments).
-    """
+    """A release download failed or did not match its signed size/SHA-256."""
 
     def __init__(self, message: str, code: str = Code.DOWNLOAD_FAILED) -> None:
         super().__init__(message)
@@ -153,17 +111,12 @@ class DownloadError(VelsigilError):
 
 
 class EnvelopeError(VelsigilError):
-    """A signed response envelope was rejected.
-
-    ``reason`` is one of the ``EnvelopeError.*`` constants.
-    """
+    """A signed response envelope was rejected; ``reason`` is one of the constants."""
 
     INVALID_SIGNATURE = "invalid_signature"
     NONCE_MISMATCH = "nonce_mismatch"
     PRODUCT_MISMATCH = "product_mismatch"
     TYPE_MISMATCH = "type_mismatch"
-    #: The signed lease or ``activation.hwidHash`` belongs to another device
-    #: than the one the request was sent for.
     HWID_MISMATCH = "hwid_mismatch"
     MALFORMED = "malformed"
 
@@ -173,10 +126,7 @@ class EnvelopeError(VelsigilError):
 
 
 class LeaseError(VelsigilError):
-    """An offline lease token was rejected.
-
-    ``reason`` is one of the ``LeaseError.*`` constants.
-    """
+    """An offline lease token was rejected; ``reason`` is one of the constants."""
 
     INVALID_SIGNATURE = "invalid_signature"
     EXPIRED = "expired"

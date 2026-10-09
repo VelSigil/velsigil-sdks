@@ -1,5 +1,4 @@
-// libcurl transport. TLS peer and host verification stay enabled, redirects are never followed,
-// only http/https are allowed and response bodies are size-capped.
+// libcurl transport: TLS verification on, no redirects, http/https only, size-capped bodies.
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -24,8 +23,7 @@ namespace {
 constexpr std::size_t kMaxResponseBytes = 1024 * 1024;  // client API responses are a few KB
 
 bool ensure_curl_global_init() {
-  // curl_global_init() is not thread-safe on older libcurl versions: run it exactly once. It is
-  // intentionally never paired with curl_global_cleanup() (process lifetime).
+  // curl_global_init() is not thread-safe on older libcurl: run it once, never clean up.
   static std::once_flag once;
   static CURLcode result = CURLE_FAILED_INIT;
   std::call_once(once, [] { result = curl_global_init(CURL_GLOBAL_DEFAULT); });
@@ -61,7 +59,7 @@ bool restrict_protocols(CURL* handle) {
 #endif
 }
 
-// Options shared by every request. Failing to apply any of them aborts the request (fail closed).
+// Any option that fails to apply aborts the request (fail closed).
 bool configure_common(CURL* handle, const std::string& url, long connect_timeout_ms, const std::string& user_agent) {
   return curl_easy_setopt(handle, CURLOPT_URL, url.c_str()) == CURLE_OK && restrict_protocols(handle) &&
          curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L) == CURLE_OK &&
@@ -83,7 +81,7 @@ struct BodySink {
   bool overflow = false;
 };
 
-// libcurl write callback; must not let exceptions escape into C code.
+// Must not let exceptions escape into C code.
 std::size_t write_body(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
   auto* sink = static_cast<BodySink*>(userdata);
   if (size != 0 && nmemb > (std::numeric_limits<std::size_t>::max)() / size) return 0;
@@ -100,13 +98,11 @@ std::size_t write_body(char* ptr, std::size_t size, std::size_t nmemb, void* use
   return length;
 }
 
-// A Retry-After value is a number of seconds or an HTTP-date of at most 33 characters; a longer one is not used.
+// Valid Retry-After values are at most 33 characters.
 constexpr std::size_t kMaxRetryAfterBytes = 128;
 
-// libcurl header callback of post_json: keeps the raw `Retry-After` value of the final response (the Client
-// parses it, see ValidationResult::retry_after). libcurl passes the header lines of every response it reads (a
-// proxy's CONNECT answer, an interim 100 Continue), so each status line starts over; of repeated headers the last
-// one counts. Must not let exceptions escape into C code.
+// Keeps the final response's Retry-After: each status line (CONNECT, 100 Continue) starts over.
+// Must not let exceptions escape into C code.
 std::size_t read_header(char* buffer, std::size_t size, std::size_t nitems, void* userdata) {
   auto* retry_after = static_cast<std::optional<std::string>*>(userdata);
   if (size != 0 && nitems > (std::numeric_limits<std::size_t>::max)() / size) return 0;
@@ -123,7 +119,7 @@ std::size_t read_header(char* buffer, std::size_t size, std::size_t nitems, void
   while (!value.empty() && is_space(value.front())) value.remove_prefix(1);
   while (!value.empty() && is_space(value.back())) value.remove_suffix(1);
   try {
-    // An over-long value is kept as an empty one: unparseable, so no retry_after.
+    // An over-long value is stored empty, so it parses as no retry_after.
     *retry_after = value.size() <= kMaxRetryAfterBytes ? std::string(value) : std::string();
   } catch (...) {
     retry_after->reset();
@@ -217,8 +213,7 @@ HttpResponse CurlTransport::post_json(const std::string& url, const std::string&
 
   if (code != CURLE_OK) {
     if (sink.overflow && status != 0) {
-      // An oversized body is dropped; the empty body is then rejected as an invalid response. Its headers (all
-      // read before the body) still count: an oversized 429 or 503 keeps its Retry-After.
+      // Drop an oversized body (rejected later as invalid) but keep its Retry-After.
       response.transport_ok = true;
       response.status = status;
       response.retry_after = std::move(retry_after);

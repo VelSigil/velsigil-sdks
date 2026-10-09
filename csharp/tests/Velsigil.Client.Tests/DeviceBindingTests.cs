@@ -7,11 +7,7 @@ using Xunit;
 
 namespace Velsigil.Client.Tests;
 
-/// <summary>
-/// LIC-4: the signature binds a response to the request only via nonce, product and type. Answers to
-/// device-bound requests must also describe this device: a signed <c>activation.hwidHash</c> (or lease)
-/// of another hardware id means the request was rewritten in transit, so nothing from it is used.
-/// </summary>
+/// <summary>Answers to device-bound requests must describe this device, or nothing from them is used.</summary>
 public class DeviceBindingTests
 {
     private const string Key = TestClients.LicenseKey;

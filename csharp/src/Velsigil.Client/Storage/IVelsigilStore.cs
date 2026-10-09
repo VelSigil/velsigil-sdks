@@ -1,15 +1,9 @@
 namespace Velsigil.Client.Storage;
 
-/// <summary>
-/// Persistence for per-product client state: the device secret issued by the server and the latest
-/// offline lease token. Implementations must be thread-safe; the client may call them concurrently.
-/// </summary>
+/// <summary>Per-product store for the device secret and offline lease token; must be thread-safe.</summary>
 /// <remarks>
-/// The device secret is a credential that proves this device's identity to the server. Store it where
-/// only the current OS user can read it (the built-in <see cref="FileStore"/> does this), or wrap it with
-/// DPAPI / Keychain / libsecret in a custom implementation. Methods should not throw for a missing
-/// entry; exceptions thrown by an implementation are caught by the client and reported through
-/// <see cref="VelsigilClientOptions.StoreErrorHandler"/>.
+/// The device secret is a credential: keep it readable only by the current OS user.
+/// Exceptions are caught and reported through <see cref="VelsigilClientOptions.StoreErrorHandler"/>.
 /// </remarks>
 public interface IVelsigilStore
 {

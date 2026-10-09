@@ -18,18 +18,16 @@ option(VX_INSTALL "Generate install and package export rules" ${VX_IS_TOP_LEVEL}
 
 include(GNUInstallDirs)
 
-# vcpkg's *-static triplets build everything against the static MSVC runtime (/MT); match it.
+# Match the static MSVC runtime (/MT) that vcpkg's -static triplets use.
 if(MSVC AND DEFINED VCPKG_TARGET_TRIPLET AND VCPKG_TARGET_TRIPLET MATCHES "-static$" AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-# ---- dependencies ---------------------------------------------------------------------------------
-
-find_package(Threads REQUIRED)  # std::call_once / std::mutex need -pthread on older glibc
+find_package(Threads REQUIRED)  # -pthread on older glibc
 find_package(CURL REQUIRED)
 find_package(nlohmann_json 3.7 CONFIG REQUIRED)
 
-# libsodium: vcpkg ships the CMake package "unofficial-sodium"; distributions ship pkg-config files.
+# vcpkg ships "unofficial-sodium"; Linux distributions ship pkg-config files.
 find_package(unofficial-sodium CONFIG QUIET)
 if(TARGET unofficial-sodium::sodium)
   set(VX_SODIUM_TARGET unofficial-sodium::sodium)
@@ -41,8 +39,7 @@ else()
   set(VX_SODIUM_FROM_PKGCONFIG ON)
 endif()
 
-# ---- library --------------------------------------------------------------------------------------
-# Always static: license checks living in a separately replaceable shared library are easier to patch.
+# Static on purpose: a separate shared library is easier to patch out.
 
 add_library(velsigil STATIC
   src/base64.cpp
@@ -66,8 +63,7 @@ target_include_directories(velsigil
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# The public header only uses the standard library; dependencies stay private (static linking still
-# propagates them as link-only requirements, see cmake/velsigilConfig.cmake.in).
+# Dependencies stay private: the public header only uses the standard library.
 target_link_libraries(velsigil
   PRIVATE
     CURL::libcurl
@@ -76,9 +72,9 @@ target_link_libraries(velsigil
     $<BUILD_INTERFACE:nlohmann_json::nlohmann_json>)
 
 if(WIN32)
-  # Windows 7+ API level (RegGetValueW, WC_ERR_INVALID_CHARS); matters for MinGW's older defaults.
+  # Windows 7 API level; MinGW defaults to an older one.
   target_compile_definitions(velsigil PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0601 WINVER=0x0601)
-  target_link_libraries(velsigil PRIVATE advapi32)  # registry (MachineGuid) and file ACL APIs
+  target_link_libraries(velsigil PRIVATE advapi32)  # registry and file ACLs
 endif()
 
 if(MSVC)
@@ -86,8 +82,6 @@ if(MSVC)
 else()
   target_compile_options(velsigil PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-
-# ---- examples -------------------------------------------------------------------------------------
 
 if(VX_BUILD_EXAMPLES)
   add_executable(velsigil_example_basic examples/basic.cpp)
@@ -97,12 +91,10 @@ if(VX_BUILD_EXAMPLES)
   endif()
 endif()
 
-# ---- tests ----------------------------------------------------------------------------------------
-
 if(VX_BUILD_TESTS)
   enable_testing()
 
-  # The release source tarball carries the vectors next to this file; a repository checkout keeps them one level up.
+  # Release tarballs ship the vectors here; a repository checkout keeps them one level up.
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test-vectors.json")
     set(VX_DEFAULT_TEST_VECTORS "${CMAKE_CURRENT_SOURCE_DIR}/test-vectors.json")
   else()
@@ -113,22 +105,19 @@ if(VX_BUILD_TESTS)
     message(FATAL_ERROR "VX_TEST_VECTORS: ${VX_TEST_VECTORS} does not exist. Pass -DVX_TEST_VECTORS=<path to test-vectors.json> or -DVX_BUILD_TESTS=OFF.")
   endif()
 
-  # Conformance with the shared test vectors (mandatory). The public low-level helpers refuse the published
-  # test-vector keys, so the vectors are verified through the internal entry points of src/detail.hpp.
+  # The public helpers refuse the test-vector keys, so this test uses src/detail.hpp.
   add_executable(velsigil_vector_tests tests/vector_tests.cpp)
   target_link_libraries(velsigil_vector_tests PRIVATE velsigil::velsigil nlohmann_json::nlohmann_json)
   target_include_directories(velsigil_vector_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_definitions(velsigil_vector_tests PRIVATE VX_TEST_VECTORS_PATH="${VX_TEST_VECTORS}")
   add_test(NAME velsigil_vector_tests COMMAND velsigil_vector_tests)
 
-  # Client behaviour against an in-process signing server (injected transport + fake clock).
   add_executable(velsigil_client_tests tests/client_tests.cpp)
   target_link_libraries(velsigil_client_tests PRIVATE velsigil::velsigil nlohmann_json::nlohmann_json ${VX_SODIUM_TARGET} Threads::Threads)
   target_include_directories(velsigil_client_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_definitions(velsigil_client_tests PRIVATE VX_TEST_VECTORS_PATH="${VX_TEST_VECTORS}")
   add_test(NAME velsigil_client_tests COMMAND velsigil_client_tests)
 
-  # The opt-in type-less verify_envelope overloads (VELSIGIL_ALLOW_UNTYPED_ENVELOPE; deleted without it).
   add_executable(velsigil_untyped_optin_tests tests/untyped_optin_tests.cpp)
   target_link_libraries(velsigil_untyped_optin_tests PRIVATE velsigil::velsigil nlohmann_json::nlohmann_json)
   target_include_directories(velsigil_untyped_optin_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -145,7 +134,6 @@ if(VX_BUILD_TESTS)
     endif()
   endforeach()
 
-  # Real libcurl round trips against tests/mock_server/mock_server.py (optional).
   if(VX_BUILD_HTTP_TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_executable(velsigil_http_tests tests/http_tests.cpp)
@@ -158,8 +146,6 @@ if(VX_BUILD_TESTS)
               --vectors ${VX_TEST_VECTORS} -- $<TARGET_FILE:velsigil_http_tests>)
   endif()
 endif()
-
-# ---- install / export -----------------------------------------------------------------------------
 
 if(VX_INSTALL)
   include(CMakePackageConfigHelpers)

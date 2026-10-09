@@ -1,5 +1,3 @@
-// Velsigil client: request construction, signed-envelope verification, result mapping, clock-skew
-// recovery, device-secret persistence and offline leases (SPEC sections 10 and 14).
 #include "velsigil/client.hpp"
 
 #include <nlohmann/json.hpp>
@@ -20,12 +18,10 @@ namespace {
 using json = nlohmann::json;
 
 constexpr char kApiSuffix[] = "/api/client/v1";
-constexpr std::size_t kMaxMessageBytes = 1024;      // cap for server/transport text copied into results
-constexpr std::size_t kMaxStoredValueBytes = 16384;  // cap for values persisted from responses
+constexpr std::size_t kMaxMessageBytes = 1024;      // server/transport text copied into results
+constexpr std::size_t kMaxStoredValueBytes = 16384;  // values persisted from responses
 constexpr std::size_t kMaxRequestIdBytes = 128;
-constexpr std::size_t kMaxTrialKeyChars = 64;  // a key as the server issues it (= the licenseKeyInput limit)
-
-// ---- small string helpers -----------------------------------------------------------------------
+constexpr std::size_t kMaxTrialKeyChars = 64;  // the server's license key limit
 
 bool is_ascii_space(char c) noexcept {
   return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
@@ -87,7 +83,6 @@ bool is_sha256_hex(std::string_view text) noexcept {
   return true;
 }
 
-// The key of a started in-app trial: 1-64 printable ASCII characters, like every license key.
 bool is_trial_key(std::string_view text) noexcept {
   if (text.empty() || text.size() > kMaxTrialKeyChars) return false;
   for (const char c : text) {
@@ -97,7 +92,6 @@ bool is_trial_key(std::string_view text) noexcept {
   return true;
 }
 
-// "https://host:port" part of an absolute URL (used to resolve relative download URLs).
 std::string url_origin(std::string_view url) {
   const std::size_t scheme_end = url.find("://");
   if (scheme_end == std::string_view::npos) return {};
@@ -105,9 +99,7 @@ std::string url_origin(std::string_view url) {
   return std::string(url.substr(0, path_start));
 }
 
-// The parts of an absolute URL the transport policy reads: the lowercased scheme and the host of the
-// authority (no port; an IPv6 literal keeps its brackets). `error` explains a URL without a usable host.
-// `host` views `url`, so it is valid only while `url` is. Shared by url_policy_error and is_loopback_url.
+// Scheme and host of an absolute URL; `host` views `url`, so it is valid only while `url` is.
 struct UrlTarget {
   std::string scheme;
   std::string_view host;
@@ -154,13 +146,8 @@ UrlTarget parse_url_target(std::string_view url) {
   return out;
 }
 
-// ---- published test keys ------------------------------------------------------------------------
-
-// The public keys of the shared SDK test vectors (sdks/test-vectors.json: keys.publicKey and
-// keys.wrongPublicKey). Their private seeds are published in the same file, so anyone can sign answers
-// that verify with them. The Client refuses them unless the API URL's host is loopback (a local test
-// server); the public low-level helpers (verify_envelope_typed, verify_lease and the opt-in untyped
-// verify_envelope) have no API URL and refuse them always. Internal; not part of the API.
+// Public keys of the shared test vectors. Their private seeds are published, so they are
+// refused unless the API host is loopback (the public helpers refuse them always).
 constexpr const char* kPublishedTestPublicKeys[] = {
     "I8lY1RS9MwgbPMa+7xrzLkdKhAGCoMbVmRApSuJjToI=",
     "b/OKSQM/kKwu80PNfHkda3EM9dk1/ZmNKkQz/1azw/Q=",
@@ -170,8 +157,7 @@ constexpr char kPublishedTestKeyError[] =
     "This is the public test key from the Velsigil SDK test vectors, whose private key is published: anyone could "
     "forge license answers for it. Use your product's public key (panel: Products > your product > Integration).";
 
-// Compares the decoded key bytes, so no other encoding of a test key (without padding, with surrounding
-// whitespace) slips through.
+// Compares decoded bytes so no other encoding of a test key slips through.
 bool is_published_test_key(const detail::PublicKey& key) {
   for (const char* encoded : kPublishedTestPublicKeys) {
     const auto test_key = detail::parse_public_key(encoded);
@@ -179,8 +165,6 @@ bool is_published_test_key(const detail::PublicKey& key) {
   }
   return false;
 }
-
-// ---- results ------------------------------------------------------------------------------------
 
 ValidationResult failure(const char* code, std::string message) {
   ValidationResult result;
@@ -204,9 +188,7 @@ ValidationResult unexpected_failure() {
   return failure(codes::kInvalidResponse, "An unexpected error occurred while processing the response.");
 }
 
-// ---- typed JSON field readers -------------------------------------------------------------------
-// Each reader returns false when a field is present with an unexpected type (or missing although
-// required). Optional fields that are absent or null leave the output untouched / reset.
+// Readers return false for a present field of the wrong type, or a missing required one.
 
 enum class Need { optional, required };
 
@@ -294,18 +276,13 @@ bool read_string_array(const json& object, const char* key, std::vector<std::str
   return true;
 }
 
-// ---- payload sections ---------------------------------------------------------------------------
-
 bool parse_license(const json& j, LicenseInfo& out) {
   return j.is_object() && read_string(j, "id", out.id, Need::required) && read_string(j, "plan", out.plan, Need::optional) &&
          read_string(j, "status", out.status, Need::required) && read_string_array(j, "features", out.features) &&
          read_optional_int(j, "expiresAt", out.expires_at) && read_int(j, "maxDevices", out.max_devices, Need::optional) &&
          read_int(j, "devicesUsed", out.devices_used, Need::optional) &&
          read_int(j, "createdAt", out.created_at, Need::optional) &&
-         // Optional free-trial flag (SPEC 9.7): absent/null keeps false; a non-boolean is malformed.
          read_bool(j, "trial", out.is_trial, Need::optional) &&
-         // Optional trial conversion reference (SPEC 9.7): absent/null = none; anything but a well-formed
-         // string (1-200 characters of [A-Za-z0-9_-]) is malformed.
          read_optional_string(j, "trialRef", out.trial_ref) && (!out.trial_ref.has_value() || is_trial_ref(*out.trial_ref));
 }
 
@@ -342,7 +319,6 @@ bool parse_download(const json& j, DownloadInfo& out) {
          read_string(j, "version", out.version, Need::optional);
 }
 
-// Maps a verified payload to a result. nullopt when the payload does not have the expected shape.
 std::optional<ValidationResult> result_from_payload(const json& payload, std::string_view type,
                                                     std::optional<std::string>& issued_secret) {
   ValidationResult result;
@@ -354,8 +330,7 @@ std::optional<ValidationResult> result_from_payload(const json& payload, std::st
       !read_optional_int(payload, "serverTime", result.server_time)) {
     return std::nullopt;
   }
-  // Defence in depth: a signed `ok` must also carry code `ok`. The one documented exception (SPEC 10.2)
-  // is an update check with nothing published: `ok: true, code: no_release, update: null`.
+  // A signed `ok` must carry code `ok`, except an update check with nothing published (no_release).
   result.ok = ok_flag && (result.code == codes::kOk || (type == "update_check" && result.code == codes::kNoRelease));
   result.message = clip(std::move(result.message));
   if (!request_id.empty() && request_id.size() <= kMaxRequestIdBytes) result.request_id = std::move(request_id);
@@ -385,8 +360,7 @@ std::optional<ValidationResult> result_from_payload(const json& payload, std::st
     if (!parse_download(*it, download)) return std::nullopt;
     result.download = std::move(download);
   }
-  // A started in-app trial (SPEC 10.1) must carry a well-formed key. The field is read on no other answer
-  // (there it is ignored like any unknown field), so no other answer can hand the app a key.
+  // Only a trial answer may hand the app a key, and it must be well-formed.
   if (type == "trial" && result.ok) {
     const auto it = payload.find("trial");
     if (it == payload.end() || !it->is_object()) return std::nullopt;
@@ -397,23 +371,17 @@ std::optional<ValidationResult> result_from_payload(const json& payload, std::st
   return result;
 }
 
-// ---- envelope and lease verification ------------------------------------------------------------
-
 struct OpenedEnvelope {
   EnvelopeStatus status = EnvelopeStatus::invalid_signature;
   std::string payload_text;
   json payload;
 };
 
-// Defined below; the device-binding check reuses the lease verifier.
 LeaseVerification check_lease(std::string_view token, const detail::PublicKey& key, std::string_view product_id,
                               std::string_view hwid, std::int64_t now);
 
-// The signature binds a payload to its request only through nonce, product and type. The answer to a
-// device-bound request must also describe the requesting device: its signed lease (issued for
-// sha256(hwid)) and the optional activation.hwidHash. A mismatch means the request (hwid, device
-// secret) was rewritten in transit, e.g. by a license-sharing proxy. Returns `valid` or the failure;
-// other lease defects (expired, ...) are not binding failures, such a lease is just never stored.
+// The answer to a device-bound request must describe the requesting device (lease, hwidHash);
+// a mismatch means the request was rewritten in transit, e.g. by a license-sharing proxy.
 EnvelopeStatus check_device_binding(const json& payload, const detail::PublicKey& key, std::string_view product_id,
                                     std::string_view hwid) {
   if (const auto activation = payload.find("activation"); activation != payload.end() && activation->is_object()) {
@@ -436,11 +404,8 @@ EnvelopeStatus check_device_binding(const json& payload, const detail::PublicKey
   return EnvelopeStatus::valid;
 }
 
-// Core of open_envelope_typed and of the opt-in, deprecated public verify_envelope overloads. Call
-// open_envelope_typed instead: `expected_type` std::nullopt skips the type check and is passed only
-// by those overloads (through verify_envelope_text and untyped_detail::verify_envelope_untyped).
-// `expected_type`: the endpoint of the request; the signed `type` must match it (an empty value never
-// matches). `expected_hwid`: the hwid of a device-bound request (empty: no device-binding check).
+// Core of open_envelope_typed. A nullopt `expected_type` skips the type check (deprecated
+// overloads only); an empty `expected_hwid` skips the device-binding check.
 OpenedEnvelope open_envelope_impl(const json& envelope, const detail::PublicKey& key, std::string_view expected_nonce,
                                   std::string_view expected_product_id, std::optional<std::string_view> expected_type,
                                   std::string_view expected_hwid) {
@@ -451,12 +416,10 @@ OpenedEnvelope open_envelope_impl(const json& envelope, const detail::PublicKey&
   if (data_it == envelope.end() || sig_it == envelope.end() || !data_it->is_string() || !sig_it->is_string()) return out;
   const std::string& data = data_it->get_ref<const std::string&>();
 
-  // 1. Authenticate the exact ASCII bytes of `data` with the trusted key. Nothing from the payload
-  //    is decoded or parsed before this succeeds. `kid` is deliberately ignored.
+  // Verify the exact bytes of `data` before decoding anything; `kid` is ignored.
   const auto signature = detail::base64url_decode(sig_it->get_ref<const std::string&>());
   if (!signature || !detail::ed25519_verify(*signature, data, key)) return out;
 
-  // 2. Decode and parse the authenticated payload.
   out.status = EnvelopeStatus::malformed;
   const auto raw = detail::base64url_decode(data);
   if (!raw) return out;
@@ -472,7 +435,6 @@ OpenedEnvelope open_envelope_impl(const json& envelope, const detail::PublicKey&
     return out;
   }
 
-  // 3. Bind the response to this request (nonce echo) and to this product.
   const auto nonce_it = payload.find("nonce");
   if (nonce_it == payload.end() || !nonce_it->is_string() || nonce_it->get_ref<const std::string&>() != expected_nonce) {
     out.status = EnvelopeStatus::nonce_mismatch;
@@ -487,8 +449,7 @@ OpenedEnvelope open_envelope_impl(const json& envelope, const detail::PublicKey&
     return out;
   }
 
-  // 4. ...and to the endpoint it went to: the server signs `ok: true` for an update check (no license
-  //    involved), which must never pass as the answer to a validate, deactivate or download request.
+  // A signed update-check `ok` must never pass as the answer to another endpoint.
   if (expected_type) {
     const auto type_it = payload.find("type");
     if (expected_type->empty() || type_it == payload.end() || !type_it->is_string() ||
@@ -499,7 +460,6 @@ OpenedEnvelope open_envelope_impl(const json& envelope, const detail::PublicKey&
     }
   }
 
-  // 5. For a device-bound request: the signed lease / activation must belong to this device.
   if (!expected_hwid.empty()) {
     const EnvelopeStatus binding = check_device_binding(payload, key, expected_product_id, expected_hwid);
     if (binding != EnvelopeStatus::valid) {
@@ -513,9 +473,7 @@ OpenedEnvelope open_envelope_impl(const json& envelope, const detail::PublicKey&
   return out;
 }
 
-// Opens the envelope answering a request to the `expected_type` endpoint ("validate", "deactivate",
-// "update_check", "download"): signature, version, nonce, product, type (always checked; an empty value
-// never matches) and, with a non-empty `expected_hwid`, the device binding.
+// Opens an envelope with every check, including the type (an empty type never matches).
 OpenedEnvelope open_envelope_typed(const json& envelope, const detail::PublicKey& key, std::string_view expected_nonce,
                                    std::string_view expected_product_id, std::string_view expected_type,
                                    std::string_view expected_hwid) {
@@ -535,7 +493,7 @@ LeaseVerification check_lease(std::string_view token, const detail::PublicKey& k
   const auto signature = detail::base64url_decode(token.substr(dot + 1));
   if (!signature) return out;
 
-  // Signature over the ASCII bytes of the first part, verified before anything is decoded.
+  // Verify the signature before decoding anything.
   if (!detail::ed25519_verify(*signature, body, key)) {
     out.status = LeaseStatus::invalid_signature;
     return out;
@@ -626,7 +584,7 @@ bool is_safe_request_id(std::string_view value) noexcept {
   return true;
 }
 
-// Fixed SDK text for unsigned failures: text from an unsigned (attacker-controllable) body is never shown.
+// Unsigned bodies are attacker-controllable, so their failures use fixed SDK text.
 std::string unsigned_message(const char* code, long status) {
   const std::string_view c(code);
   if (c == codes::kValidationError) return "The license server rejected the request as invalid.";
@@ -644,14 +602,8 @@ std::string unsigned_message(const char* code, long status) {
   return "Unexpected HTTP " + std::to_string(status) + " response from the license server.";
 }
 
-// Unsigned HTTP error (status != 200). Never produces success. The mapping is identical in every
-// Velsigil SDK (SPEC section 14): a known code in a Velsigil error body ({"error":{"code":...}}) wins;
-// otherwise 400 -> validation_error, 413 -> payload_too_large, 415 -> unsupported_media_type,
-// 429 -> rate_limited, 502/503/504 -> network_error without a Velsigil error body (a proxy in front of
-// an unreachable server) or internal_error with one, other 5xx -> internal_error, anything else ->
-// invalid_response. `type`: the endpoint of the request; a Velsigil 404 `not_found` from the in-app trial
-// endpoint means the server predates it (panel_too_old). The offline fallback does not depend on this
-// mapping: it applies to every unsigned 5xx (see server_unavailable_status).
+// Unsigned HTTP error; never a success. The mapping is the same in every Velsigil SDK.
+// A 404 not_found from the trial endpoint means the server predates in-app trials.
 ValidationResult unsigned_failure(long status, const json* body, std::string_view type) {
   std::string code;
   std::string request_id;
@@ -664,7 +616,7 @@ ValidationResult unsigned_failure(long status, const json* body, std::string_vie
         velsigil_body = true;
         code = code_it->get<std::string>();
       }
-      // Wrong types simply leave the field empty; this response is untrusted either way.
+      // Wrong types leave the field empty; the response is untrusted anyway.
       (void)read_string(*error_it, "requestId", request_id, Need::optional);
     }
   }
@@ -704,20 +656,11 @@ ValidationResult unsigned_failure(long status, const json* body, std::string_vie
   return result;
 }
 
-// An unsigned HTTP 5xx means the license server is unavailable: the app is up but cannot answer (its database
-// is down: 500 internal_error, 503 service_busy or an empty 503) or the gateway in front of it cannot reach it
-// (IIS ARR / Caddy 502, 503, 504, often with an HTML or empty body). validate_with_offline_fallback() treats it
-// like a missing response (network_error). Only the status counts, never the body (Velsigil error, HTML, empty
-// or garbled): whoever can inject an unsigned 5xx can as well drop the connection, which already allows the
-// fallback, and the lease itself is signed, bound to this device and time-limited. Signed answers (always HTTP
-// 200) and every 4xx (429 rate_limited, 400 validation_error, ...) stay final.
+// Any unsigned 5xx allows the offline fallback. The body is ignored because it is unsigned;
+// signed answers and every 4xx stay final.
 bool server_unavailable_status(long status) noexcept { return status >= 500 && status <= 599; }
 
-// ---- Retry-After (SPEC 14) ------------------------------------------------------------------------
-// ValidationResult::retry_after comes from the Retry-After header of every HTTP 429 and 503 answer, whatever code it
-// maps to (rate_limited; network_error for the server's empty 503 while its database is unreachable or a gateway's
-// 503; internal_error for 503 service_busy). Delta-seconds or an HTTP-date, clamped to one day as in the Python
-// and .NET SDKs.
+// Retry-After of HTTP 429 and 503 answers, clamped to one day as in the other SDKs.
 
 constexpr std::int64_t kMaxRetryAfterSeconds = 86400;
 
@@ -781,11 +724,8 @@ std::int64_t parse_time_of_day(std::string_view text) noexcept {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
-// Unix time of an HTTP-date (RFC 9110 section 5.6.7; always GMT) in one of its three forms:
-//   IMF-fixdate  "Sun, 06 Nov 1994 08:49:37 GMT"
-//   RFC 850      "Sunday, 06-Nov-94 08:49:37 GMT"  (two-digit year: 69..99 -> 19xx, 00..68 -> 20xx)
-//   asctime      "Sun Nov  6 08:49:37 1994"
-// The day name is checked, not whether it matches the date. nullopt for anything else.
+// Unix time of an HTTP-date in IMF-fixdate, RFC 850 or asctime form (GMT); nullopt otherwise.
+// RFC 850 two-digit years: 69..99 -> 19xx, 00..68 -> 20xx.
 std::optional<std::int64_t> http_date_unix(std::string_view text) noexcept {
   std::string_view tokens[6];
   std::size_t count = 0;
@@ -832,8 +772,7 @@ std::optional<std::int64_t> http_date_unix(std::string_view text) noexcept {
   return days_from_civil(year, month, day) * 86400 + time_of_day;
 }
 
-// Signed denials after which a stored offline lease must not be used any more. This exact set is
-// binding for every Velsigil SDK (SPEC section 14); any other signed failure keeps the lease.
+// Signed denials that make the stored lease unusable; the set is the same in every SDK.
 bool revokes_offline_access(const std::string& code) {
   static constexpr const char* kCodes[] = {codes::kInvalidKey,         codes::kLicenseExpired,
                                            codes::kLicenseSuspended,   codes::kLicenseRevoked,
@@ -852,18 +791,16 @@ constexpr std::size_t kMaxVersionChars = 32;
 constexpr std::size_t kMaxDeviceNameBytes = 255;  // the server counts characters; bytes are a safe upper bound
 constexpr std::size_t kMaxEmailBytes = 254;       // the server's e-mail schema limit
 
-// already_licensed (SPEC 14): start_trial() on a device that already holds a license (stored secret or lease).
 constexpr char kAlreadyLicensedMessage[] =
     "This device already holds a license for this product (a stored device secret or offline lease); a free trial "
     "cannot replace it. Validate the saved license key instead, or call deactivate() or clear_local_state() first. "
     "No request was sent.";
 
-// store_unavailable (SPEC 14): start_trial() could not read the store, so it cannot tell whether a license is stored.
 constexpr char kStoreUnavailableMessage[] =
     "The license store could not be read, so it is unknown whether this device already holds a license for this "
     "product; a free trial was not started. Try again once the store can be read. No request was sent.";
 
-// Local argument checks (SPEC 14 `validation_error`): nothing is sent when they fail.
+// Local argument checks; nothing is sent when they fail.
 std::optional<ValidationResult> check_inputs(const std::string* license_key, const std::optional<std::string>& version,
                                              const std::optional<std::string>& device_name) {
   if (license_key != nullptr) {
@@ -889,8 +826,6 @@ struct Interpreted {
 };
 
 }  // namespace
-
-// ---- detail helpers implemented here --------------------------------------------------------------
 
 namespace detail {
 
@@ -941,16 +876,13 @@ std::optional<std::int64_t> parse_retry_after(std::string_view value, std::int64
   }
   const std::optional<std::int64_t> when = http_date_unix(value);
   if (!when) return std::nullopt;
-  // Whole seconds on both sides, so nothing to round. Ordered so that no subtraction can overflow, whatever the
-  // injected clock returns.
+  // Ordered so no subtraction can overflow, whatever the injected clock returns.
   if (*when <= now_unix) return 0;
   if (now_unix < *when - kMaxRetryAfterSeconds) return kMaxRetryAfterSeconds;
   return *when - now_unix;
 }
 
 }  // namespace detail
-
-// ---- ValidationResult helpers ---------------------------------------------------------------------
 
 bool ValidationResult::has_feature(std::string_view feature) const noexcept {
   if (!ok || !license) return false;
@@ -980,8 +912,6 @@ std::string ValidationResult::with_trial_ref(std::string_view buy_url) const {
   return velsigil::with_trial_ref(buy_url, *license->trial_ref);
 }
 
-// ---- trial conversion references (SPEC 9.7) --------------------------------------------------------------
-
 bool is_trial_ref(std::string_view text) noexcept {
   if (text.empty() || text.size() > 200) return false;
   for (const char c : text) {
@@ -994,7 +924,7 @@ bool is_trial_ref(std::string_view text) noexcept {
 std::string with_trial_ref(std::string_view url, std::string_view ref) {
   std::string out(url);
   if (!is_trial_ref(ref)) return out;
-  // Only absolute http(s) URLs; the host decides the parameter (Stripe Payment Links have their own).
+  // Only absolute http(s) URLs; Stripe Payment Links use their own parameter.
   std::size_t rest_start = 0;
   const std::string lower = ascii_lower(url);
   if (lower.rfind("https://", 0) == 0) {
@@ -1037,29 +967,22 @@ std::optional<std::int64_t> ValidationResult::seconds_until_expiry() const noexc
 std::optional<std::int64_t> ValidationResult::days_until_expiry(std::int64_t now_unix) const noexcept {
   const auto seconds = seconds_until_expiry(now_unix);
   if (!seconds) return std::nullopt;
-  // Rounded up (CLIENT_PROTOCOL 5.2): a part day still counts as a day left. `*seconds` is never negative.
+  // Rounded up: a part day still counts as a day left.
   return *seconds / 86400 + (*seconds % 86400 != 0 ? 1 : 0);
 }
 
 std::optional<std::int64_t> ValidationResult::days_until_expiry() const noexcept {
-  // The result's own time: the signed server time of an online answer, the time of an offline check.
   if (server_time) return days_until_expiry(*server_time);
   if (reference_time) return days_until_expiry(*reference_time);
   return days_until_expiry(detail::system_unix_time());
 }
 
-// ---- free functions -------------------------------------------------------------------------------
-
 namespace {
 
-// Whether a low-level helper refuses the published test-vector keys. The public helpers always pass
-// `refuse`: unlike the Client they have no API URL that could name a local test server. Only the internal
-// detail::*_unguarded entry points (the SDK's own test-vector conformance tests) pass `accept`.
+// The public helpers always refuse the test-vector keys; only the test entry points accept them.
 enum class TestKeys { refuse, accept };
 
-// Shared by verify_envelope_typed, untyped_detail::verify_envelope_untyped (the opt-in, deprecated
-// verify_envelope overloads) and detail::verify_envelope_typed_unguarded; `expected_type` is std::nullopt
-// only for the untyped one.
+// `expected_type` is nullopt only for the deprecated untyped overloads.
 EnvelopeVerification verify_envelope_text(std::string_view envelope_json, std::string_view public_key_base64,
                                           std::string_view expected_nonce, std::string_view expected_product_id,
                                           std::optional<std::string_view> expected_type, std::string_view expected_hwid,
@@ -1067,8 +990,7 @@ EnvelopeVerification verify_envelope_text(std::string_view envelope_json, std::s
   try {
     EnvelopeVerification verification;
     const auto key = detail::parse_public_key(public_key_base64);
-    // A published test-vector key takes the path of an invalid key (invalid_signature, no payload): anyone
-    // can sign answers that verify with it.
+    // A published test-vector key is treated like an invalid key.
     if (!key || (test_keys == TestKeys::refuse && is_published_test_key(*key))) return verification;
     const json envelope = json::parse(std::string(envelope_json), nullptr, false);
     if (envelope.is_discarded()) return verification;
@@ -1082,12 +1004,10 @@ EnvelopeVerification verify_envelope_text(std::string_view envelope_json, std::s
   }
 }
 
-// Shared by verify_lease and detail::verify_lease_unguarded.
 LeaseVerification verify_lease_text(std::string_view token, std::string_view public_key_base64, std::string_view product_id,
                                     std::string_view hwid, std::int64_t now_unix, TestKeys test_keys) noexcept {
   try {
     const auto key = detail::parse_public_key(public_key_base64);
-    // A published test-vector key takes the path of an invalid key (see verify_envelope_text).
     if (!key || (test_keys == TestKeys::refuse && is_published_test_key(*key))) {
       LeaseVerification verification;
       verification.status = LeaseStatus::invalid_signature;
@@ -1108,9 +1028,7 @@ EnvelopeVerification verify_envelope_typed(std::string_view envelope_json, std::
                               std::optional<std::string_view>(expected_type), expected_hwid, TestKeys::refuse);
 }
 
-// Behind the opt-in, deprecated and unsafe `verify_envelope` overloads of client.hpp (no type check),
-// which exist only where VELSIGIL_ALLOW_UNTYPED_ENVELOPE is defined (inline wrappers calling this).
-// Always compiled, so that the library itself never needs the macro.
+// Backs the opt-in untyped overloads; always compiled so the library never needs the macro.
 namespace untyped_detail {
 EnvelopeVerification verify_envelope_untyped(std::string_view envelope_json, std::string_view public_key_base64,
                                              std::string_view expected_nonce, std::string_view expected_product_id,
@@ -1125,8 +1043,7 @@ LeaseVerification verify_lease(std::string_view token, std::string_view public_k
   return verify_lease_text(token, public_key_base64, product_id, hwid, now_unix, TestKeys::refuse);
 }
 
-// Internal entry points for the SDK's own test-vector conformance tests (declared in detail.hpp, not
-// installed): the same verification without the refusal of the published test-vector keys.
+// Test-only entry points that accept the published test-vector keys.
 namespace detail {
 EnvelopeVerification verify_envelope_typed_unguarded(std::string_view envelope_json, std::string_view public_key_base64,
                                                      std::string_view expected_nonce, std::string_view expected_product_id,
@@ -1187,8 +1104,6 @@ std::string compute_hardware_id(std::string_view machine_id) {
 
 std::string hash_hardware_id(std::string_view hwid) { return detail::sha256_hex(hwid); }
 
-// ---- Client::Impl ---------------------------------------------------------------------------------
-
 namespace {
 // Empty optional strings are omitted from requests (the server treats them as absent).
 std::optional<std::string> non_empty(const std::optional<std::string>& value) {
@@ -1211,12 +1126,8 @@ struct Client::Impl {
   std::function<std::int64_t()> clock;
   std::string config_error;  // empty when the configuration is valid
   std::atomic<std::int64_t> clock_offset{0};
-  // Serializes the device-bound calls (validate, start_trial, deactivate, get_download, clear_local_state):
-  // reading the stored state, the request and persisting the answer form one step, as in the Node and Python
-  // SDKs. So a device secret issued to the first of two concurrent activations is sent by the second, and
-  // start_trial's already_licensed check cannot be overtaken by a concurrent validate. Not recursive: the
-  // Client member functions take it, once each; the only Impl method that takes it is validate() (the shared
-  // body of Client::validate and validate_with_offline_fallback, which do not take it themselves).
+  // Serializes the device-bound calls so a stored secret or the trial check cannot be overtaken.
+  // Not recursive: each public call takes it once; Impl::validate() is the only Impl method that does.
   std::mutex device_mutex;
 
   void configure(std::string api_url, std::string product, const std::string& public_key_base64, ClientOptions options) {
@@ -1249,14 +1160,13 @@ struct Client::Impl {
     origin = url_origin(base);
     endpoint_base = std::move(base);
 
-    // The server echoes the canonical lowercase id in every signed payload; compare against that form.
+    // Signed payloads echo the lowercase id; compare against that form.
     product_id = ascii_lower(trim(product));
     if (!is_uuid(product_id)) reject("The product id must be a UUID.");
 
     if (const auto key = detail::parse_public_key(public_key_base64)) {
       public_key = *key;
-      // A published test-vector key is only good for a local test server: the hosts that may also use plain
-      // http:// (the same helper decides both), whatever the scheme. Elsewhere it would accept forged answers.
+      // A published test-vector key is only accepted for a loopback API URL.
       if (is_published_test_key(*key) && !detail::is_loopback_url(endpoint_base)) reject(kPublishedTestKeyError);
     } else {
       reject("The public key must be the standard base64 encoding of a raw 32-byte Ed25519 key.");
@@ -1278,14 +1188,13 @@ struct Client::Impl {
   std::int64_t local_now() const { return clock ? clock() : detail::system_unix_time(); }
   std::int64_t server_now() const { return local_now() + clock_offset.load(std::memory_order_relaxed); }
 
-  // One store read. `readable` is false when the store threw: the value is then unknown, which is not the same
-  // as "nothing stored" (start_trial refuses on it).
+  // `readable` is false when the store threw; that is not "nothing stored".
   struct StoredValue {
     bool readable = true;
     std::optional<std::string> value;
   };
 
-  // Store access never lets an exception or failure escape: persistence is best effort.
+  // Persistence is best effort: no store exception escapes.
   StoredValue read(const char* key) const {
     StoredValue out;
     try {
@@ -1314,14 +1223,12 @@ struct Client::Impl {
     }
   }
 
-  // Absolute form of a download URL: a server-relative URL ("/...") is resolved against the API origin.
   std::string resolve_download_url(const std::string& url) const {
     if (!url.empty() && url.front() == '/') return origin + url;
     return url;
   }
 
-  // `bound_hwid`: the hwid sent with a device-bound request (empty for update checks); the signed
-  // lease/activation must then belong to this device, otherwise nothing from the response is used.
+  // With a `bound_hwid`, the signed lease/activation must belong to this device.
   Interpreted interpret(const HttpResponse& response, const std::string& nonce, std::string_view type,
                         std::string_view bound_hwid) const {
     Interpreted out;
@@ -1329,7 +1236,7 @@ struct Client::Impl {
     const bool is_object = !body.is_discarded() && body.is_object();
     if (response.status != 200) {
       out.result = unsigned_failure(response.status, is_object ? &body : nullptr, type);
-      // Every 429 and 503, whatever code it maps to (see carries_retry_after); measured from the client's clock.
+      // Every 429 and 503, measured from the client's clock.
       if (carries_retry_after(response.status) && response.retry_after) {
         out.result.retry_after = detail::parse_retry_after(*response.retry_after, local_now());
       }
@@ -1339,7 +1246,6 @@ struct Client::Impl {
       out.result = failure(codes::kInvalidResponse, "The license server response is not a signed envelope.");
       return out;
     }
-    // Signature, version, nonce, product, type (the endpoint of this request) and device binding.
     OpenedEnvelope opened = open_envelope_typed(body, public_key, nonce, product_id, type, bound_hwid);
     if (opened.status != EnvelopeStatus::valid) {
       out.result = failure(codes::kInvalidResponse, envelope_failure_message(opened.status));
@@ -1351,10 +1257,7 @@ struct Client::Impl {
       out.result = failure(codes::kInvalidResponse, envelope_failure_message(EnvelopeStatus::malformed));
       return out;
     }
-    // A download grant must be usable under the client's HTTPS policy (https; plain http only for
-    // localhost / 127.0.0.1 / [::1] or with allow_insecure_http; no credentials). Reject it already
-    // here, like the other Velsigil SDKs: the result carries no descriptor and nothing from the
-    // response is persisted. download_release() keeps its own check as a second line of defence.
+    // Reject a download URL that breaks the HTTPS policy here; download_release() checks again.
     if (parsed->download) {
       if (const auto error =
               detail::url_policy_error(resolve_download_url(parsed->download->url), allow_insecure_http)) {
@@ -1376,12 +1279,10 @@ struct Client::Impl {
     if (interpreted.issued_secret && interpreted.issued_secret->size() <= kMaxStoredValueBytes) {
       save(store_keys::kDeviceSecret, *interpreted.issued_secret);
     }
-    // A started in-app trial is a validation of the new license on this device: the same lease rules.
+    // A started trial follows the same lease rules as a validation.
     if (type == "validate" || type == "trial") {
       if (result.ok) {
-        // A lease is only issued when the product allows offline use; otherwise drop any old one. A
-        // lease that would not verify for this product and device (at the signed server time) is
-        // never stored.
+        // Store only a lease that verifies for this product and device; otherwise drop any old one.
         const bool usable = result.lease && result.lease->token.size() <= kMaxStoredValueBytes &&
                             check_lease(result.lease->token, public_key, product_id, hwid,
                                         result.server_time.value_or(server_now()))
@@ -1395,7 +1296,7 @@ struct Client::Impl {
         forget(store_keys::kLease);
       }
     } else if (type == "deactivate") {
-      // ok, or device_not_found (the server no longer knows this device): secret and lease are worthless.
+      // device_not_found also makes the secret and lease worthless.
       if (result.ok || result.code == codes::kDeviceNotFound) {
         forget(store_keys::kLease);
         forget(store_keys::kDeviceSecret);
@@ -1407,19 +1308,16 @@ struct Client::Impl {
     }
   }
 
-  // Configuration first (invalid_configuration), then the local argument checks (validation_error).
+  // Configuration errors first, then the local argument checks.
   std::optional<ValidationResult> precheck(const std::string* license_key, const std::optional<std::string>& version,
                                            const std::optional<std::string>& device_name) const {
     if (!config_error.empty()) return failure(codes::kInvalidConfiguration, config_error);
     return check_inputs(license_key, version, device_name);
   }
 
-  // Sends one signed-protocol request; on a signed clock_skew it learns the offset and retries once.
-  // `device_bound`: the answer must describe this device although no device secret is sent (the in-app
-  // trial start, whose strict request schema has no deviceSecret field).
-  // `server_unavailable` (may be null) tells whether the returned result means the server is unavailable: no
-  // HTTP response (network_error) or an unsigned HTTP 5xx, whatever its body (server_unavailable_status). Every
-  // network_error result sets it; validate_with_offline_fallback() falls back on exactly these results.
+  // Sends one request; on a signed clock_skew it learns the offset and retries once.
+  // `device_bound`: the answer must describe this device even without a device secret (trial start).
+  // `server_unavailable` (may be null) is set for results that allow the offline fallback.
   ValidationResult call(const char* path, std::string_view type, const json& fields, bool attach_device_secret,
                         bool device_bound = false, bool* server_unavailable = nullptr) {
     auto mark_unavailable = [server_unavailable](bool value) {
@@ -1460,7 +1358,6 @@ struct Client::Impl {
         return failure(codes::kNetworkError, clip(std::move(message)));
       }
 
-      // Device-bound calls: validate, deactivate and download (they attach the secret) and the trial start.
       const bool bound = attach_device_secret || device_bound;
       Interpreted interpreted = interpret(response, *nonce, type, bound ? std::string_view(hwid) : std::string_view());
       if (interpreted.verified && attempt == 0 && interpreted.result.code == codes::kClockSkew &&
@@ -1470,15 +1367,13 @@ struct Client::Impl {
         continue;
       }
       if (interpreted.verified) persist(type, interpreted);
-      // interpret() reads every non-200 answer as unsigned, so a 5xx is never a verified (signed) answer.
       mark_unavailable(!interpreted.verified && server_unavailable_status(response.status));
       return std::move(interpreted.result);
     }
     return failure(codes::kClockSkew, "The local clock could not be synchronised with the license server.");
   }
 
-  // Client::validate() and validate_with_offline_fallback(): the local checks, then the request under the
-  // device lock. `server_unavailable` (may be null) as for call().
+  // Shared by validate() and validate_with_offline_fallback(); takes the device lock.
   ValidationResult validate(const std::string& license_key, const ValidateOptions& options, bool* server_unavailable) {
     if (server_unavailable != nullptr) *server_unavailable = false;
     const auto version = non_empty(options.version);
@@ -1535,8 +1430,6 @@ struct Client::Impl {
   }
 };
 
-// ---- Client ---------------------------------------------------------------------------------------
-
 Client::Client(std::string api_url, std::string product_id, std::string public_key_base64, ClientOptions options) {
   try {
     auto impl = std::make_unique<Impl>();
@@ -1586,14 +1479,13 @@ ValidationResult Client::start_trial(const StartTrialOptions& options) {
     if (email && (email->size() > kMaxEmailBytes || has_control_characters(*email))) {
       return failure(codes::kValidationError, "The e-mail address must be at most 254 printable characters.");
     }
-    // The trial answer would overwrite the stored device secret and lease of this device's license (a paid one
-    // included): refuse locally, before any request and without touching the store. The check and the request
-    // run under the device lock, so no concurrent validate can store a license in between.
+    // Refuse locally so a trial never overwrites this device's stored license. The check and the
+    // request run under the device lock, so no concurrent validate slips in between.
     const std::lock_guard<std::mutex> device_lock(impl_->device_mutex);
     const auto stored_secret = impl_->read(store_keys::kDeviceSecret);
     const auto stored_lease = impl_->read(store_keys::kLease);
     if (!stored_secret.readable || !stored_lease.readable) {
-      // A failed read is not "nothing stored": the store may hold this device's (paid) license. Fail closed.
+      // A failed read is not "nothing stored"; fail closed.
       return failure(codes::kStoreUnavailable, kStoreUnavailableMessage);
     }
     if ((stored_secret.value && !stored_secret.value->empty()) || (stored_lease.value && !stored_lease.value->empty())) {
@@ -1604,8 +1496,7 @@ ValidationResult Client::start_trial(const StartTrialOptions& options) {
     if (device_name) fields["deviceName"] = *device_name;
     if (version) fields["version"] = *version;
     if (email) fields["email"] = *email;
-    // No device secret: the trial creates a new activation (the request schema is strict). The answer is
-    // still device-bound: its signed lease / activation.hwidHash must belong to this device.
+    // No device secret (strict request schema), but the answer is still device-bound.
     return impl_->call("/trial", "trial", fields, false, true);
   } catch (...) {
     return unexpected_failure();
@@ -1664,14 +1555,7 @@ ValidationResult Client::validate_offline() {
   }
 }
 
-// Falls back to the stored lease only when the server is unavailable: no HTTP response (network_error) or an
-// unsigned HTTP 5xx whatever its body (internal_error, or network_error for a 502/503/504 without a Velsigil error
-// body; see server_unavailable_status). Signed answers, 4xx answers and invalid responses are returned as they are.
-// The fallback is validate_offline() itself (docs/CLIENT_PROTOCOL.md section 9): its offline result, ok for a usable
-// lease, else lease_expired / lease_invalid, with the stored lease left exactly as validate_offline() leaves it. Only
-// when no lease is stored (no_lease) is the original online result (network_error, internal_error) returned. A
-// result of the fallback carries the online attempt's retry_after (the Retry-After of a 503), so the application
-// knows when to try online again (SPEC 14, every SDK).
+// Falls back to the stored lease only when the server is unavailable (no response or unsigned 5xx).
 ValidationResult Client::validate_with_offline_fallback(const std::string& license_key, const ValidateOptions& options) {
   if (!impl_) return not_initialised();
   bool server_unavailable = false;
@@ -1683,9 +1567,7 @@ ValidationResult Client::validate_with_offline_fallback(const std::string& licen
   }
   if (!server_unavailable) return online;
   ValidationResult offline = validate_offline();  // the same checks and error handling as a direct call
-  // Without any stored lease the original failure is the more useful answer; otherwise validate_offline()'s
-  // result as is (code, message, offline flag, license and lease) plus the online retry_after, as in every
-  // Velsigil SDK.
+  // Without a stored lease the online failure is more useful; otherwise keep its retry_after.
   if (offline.code == codes::kNoLease) return online;
   offline.retry_after = online.retry_after;
   return offline;
@@ -1702,7 +1584,6 @@ DownloadFileResult Client::download_release(const DownloadInfo& download, const 
   if (!impl_) return fail(codes::kInvalidConfiguration, "The client is not initialised.");
   try {
     if (!impl_->config_error.empty()) return fail(codes::kInvalidConfiguration, impl_->config_error);
-    // Local argument checks (SPEC 14 validation_error): use the descriptor returned by get_download().
     if (download.size < 0 || !is_sha256_hex(download.sha256) || download.url.empty()) {
       return fail(codes::kValidationError, "The download descriptor is incomplete.");
     }

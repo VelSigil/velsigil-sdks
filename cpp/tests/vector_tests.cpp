@@ -1,8 +1,5 @@
-// Conformance with the shared protocol vectors (sdks/test-vectors.json, SPEC 10.7). The vectors are signed
-// with keys.publicKey / keys.wrongPublicKey, whose private seeds are published, so the public low-level
-// helpers refuse those keys (run_published_key_refusal checks that). The envelope and lease vectors are
-// therefore verified through the internal entry points of src/detail.hpp, which run the same verification
-// without that refusal; everything else uses the public API. Exit code 0 = all checks passed.
+// Conformance with the shared test vectors. They are signed with the published keys, which the
+// public helpers refuse, so envelopes and leases are verified through src/detail.hpp.
 #include <velsigil/client.hpp>
 
 #include <nlohmann/json.hpp>
@@ -26,10 +23,7 @@
 #error "VX_TEST_VECTORS_PATH must point to sdks/test-vectors.json"
 #endif
 
-// SDK-1: verify_envelope_typed compiles with exactly its six arguments. A call that leaves one out must
-// not compile (no overloads, no default arguments): it could otherwise bind to a deprecated verify_envelope
-// overload that does not check the type, with the intended type taken as the hwid. (Declarations only,
-// used in unevaluated contexts.)
+// verify_envelope_typed must not compile with an argument left out (no overloads, no defaults).
 namespace sdk1_compile_checks {
 template <typename... Args>
 auto accepts_typed_call(int)
@@ -44,8 +38,7 @@ static_assert(kAcceptsTypedCall<Sv, Sv, Sv, Sv, Sv, Sv>, "verify_envelope_typed 
 static_assert(!kAcceptsTypedCall<Sv, Sv, Sv, Sv, Sv>, "verify_envelope_typed must not compile with five arguments");
 static_assert(!kAcceptsTypedCall<Sv, Sv, Sv, Sv>, "verify_envelope_typed must not compile with four arguments");
 
-// S8: without VELSIGIL_ALLOW_UNTYPED_ENVELOPE the type-less verify_envelope overloads are deleted: no call
-// compiles, whatever the arguments (tests/untyped_optin_tests.cpp covers the opt-in).
+// Without VELSIGIL_ALLOW_UNTYPED_ENVELOPE no type-less verify_envelope call compiles.
 #ifndef VELSIGIL_ALLOW_UNTYPED_ENVELOPE
 template <typename... Args>
 auto accepts_untyped_call(int)
@@ -67,12 +60,10 @@ namespace {
 
 using json = nlohmann::json;
 
-// The internal verification entry points (not installed, not part of the API): verify_envelope_typed and
-// verify_lease without their refusal of the published test-vector keys.
 using velsigil::detail::verify_envelope_typed_unguarded;
 using velsigil::detail::verify_lease_unguarded;
 
-// The Client accepts the published test-vector key only for a loopback API URL (a local test server).
+// The Client accepts the published test-vector key only for a loopback API URL.
 constexpr char kLoopbackApiUrl[] = "http://localhost:3000";
 
 int g_checks = 0;
@@ -107,11 +98,9 @@ void run_envelope_vectors(const json& vectors, const std::string& public_key, co
     const std::string name = vec.at("name").get<std::string>();
     const std::string expect = vec.at("expect").get<std::string>();
     const std::string nonce = vec.at("requestNonce").get<std::string>();
-    // The endpoint the request went to: the signed `type` must match it.
     const std::string type = vec.at("requestType").get<std::string>();
     const std::string product = vec.at("productId").get<std::string>();
     const std::string envelope = vec.at("envelope").dump();
-    // Answers to a device-bound request name the hwid that request was sent with (SPEC 14 device binding).
     const std::string hwid = vec.contains("hwid") ? vec.at("hwid").get<std::string>() : std::string();
 
     const velsigil::EnvelopeVerification verification =
@@ -119,14 +108,13 @@ void run_envelope_vectors(const json& vectors, const std::string& public_key, co
     check_equal(velsigil::to_string(verification.status), expect, "envelope '" + name + "'");
 
     if (expect == "hwid_mismatch") {
-      // The envelope itself is authentic: only the device binding rejects it.
+      // The envelope is authentic: only the device binding rejects it.
       check_equal(velsigil::to_string(verify_envelope_typed_unguarded(envelope, public_key, nonce, product, type, "").status), "valid",
                   "envelope '" + name + "' without device binding");
     }
 
     if (expect == "type_mismatch") {
-      // The envelope itself is authentic (SDK-1: a signed update-check answer, ok without any license):
-      // only the type check rejects it, also with an empty expected type...
+      // An authentic update-check answer: only the type check rejects it, also with an empty type...
       check_equal(velsigil::to_string(verify_envelope_typed_unguarded(envelope, public_key, nonce, product, "", hwid).status),
                   "type_mismatch", "envelope '" + name + "' with an empty expected type");
       // ...and it is valid as the answer to the endpoint it was signed for.
@@ -141,13 +129,11 @@ void run_envelope_vectors(const json& vectors, const std::string& public_key, co
       const json payload = json::parse(verification.payload_json, nullptr, false);
       check(!payload.is_discarded() && payload == vec.at("payload"), "envelope '" + name + "' decodes to the expected payload");
       if (name == "trial_already_used") {
-        // Free trials (SPEC 9.7): a signed failure with the new code (older SDKs: an ordinary failure code).
         check(!payload.is_discarded() && payload.at("ok") == false &&
                   payload.at("code").get<std::string>() == velsigil::codes::kTrialAlreadyUsed,
               "envelope '" + name + "' carries trial_already_used");
       }
       if (name == "validate_ok_trial_ref" || name == "license_expired_trial_ref") {
-        // The trial conversion reference (SPEC 9.7): a well-formed string the app adds to its "Buy now" link.
         const bool has_ref = !payload.is_discarded() && payload.at("license").contains("trialRef") &&
                              payload.at("license").at("trialRef").is_string();
         check(has_ref, "envelope '" + name + "' carries license.trialRef");
@@ -182,7 +168,6 @@ void run_envelope_vectors(const json& vectors, const std::string& public_key, co
     }
   }
 
-  // Structural garbage is never accepted.
   check_equal(velsigil::to_string(verify_envelope_typed_unguarded("not json", public_key, "n", "p", "validate", "").status),
               "invalid_signature", "non-JSON envelope");
   check_equal(velsigil::to_string(verify_envelope_typed_unguarded("{\"sig\":\"AAAA\"}", public_key, "n", "p", "validate", "").status),
@@ -217,7 +202,7 @@ void run_lease_vectors(const json& vectors, const std::string& public_key) {
         check(claims.license_expires_at == payload.at("licenseExpiresAt").get<std::int64_t>(), "lease claims licenseExpiresAt");
         check(claims.issued_at == payload.at("iat").get<std::int64_t>(), "lease claims iat");
         check(claims.expires_at == payload.at("exp").get<std::int64_t>(), "lease claims exp");
-        // The optional signed `trial` claim (SPEC 9.7): absent means false.
+        // The optional `trial` claim: absent means false.
         const bool trial = payload.contains("trial") && payload.at("trial").get<bool>();
         check(claims.is_trial == trial, "lease claims trial");
       }
@@ -232,10 +217,7 @@ const json& find_vector(const json& list, const std::string& name) {
   throw std::runtime_error("test vector '" + name + "' is missing");
 }
 
-// The public low-level helpers refuse both published test-vector keys, in every spelling the key decoder
-// accepts, like an invalid public key (invalid_signature, no payload / claims): unlike the Client they have no
-// API URL that could name a local test server. Each envelope and lease used below verifies with the same key
-// through the internal entry point, so the refusal is the only reason for the failure.
+// The public helpers refuse both published keys in every spelling; the internal entry point is the control.
 void run_published_key_refusal(const json& vectors, const std::string& public_key, const std::string& wrong_public_key) {
   auto check_refused = [](const std::string& label, const std::string& key, const json& envelope_vec, const json& lease_vec) {
     const std::string envelope = envelope_vec.at("envelope").dump();
@@ -266,8 +248,7 @@ void run_published_key_refusal(const json& vectors, const std::string& public_ke
     return key;
   };
 
-  // keys.publicKey signs the ordinary vectors; keys.wrongPublicKey is the key the wrong_key / lease_wrong_key
-  // vectors are signed with (keys.wrongPrivateSeedBase64).
+  // keys.wrongPublicKey signs the wrong_key and lease_wrong_key vectors.
   const json& validate_ok = find_vector(vectors.at("envelopes"), "validate_ok");
   const json& lease_ok = find_vector(vectors.at("leases"), "lease_ok");
   const json& wrong_key = find_vector(vectors.at("envelopes"), "wrong_key");
@@ -278,7 +259,6 @@ void run_published_key_refusal(const json& vectors, const std::string& public_ke
   check_refused("keys.wrongPublicKey", wrong_public_key, wrong_key, lease_wrong_key);
   check_refused("keys.wrongPublicKey without padding", unpadded(wrong_public_key), wrong_key, lease_wrong_key);
 
-  // No vector gets through the public helpers with a published key, whatever its expected status.
   for (const json& vec : vectors.at("envelopes")) {
     const std::string hwid = vec.contains("hwid") ? vec.at("hwid").get<std::string>() : std::string();
     const auto verification =
@@ -295,7 +275,6 @@ void run_published_key_refusal(const json& vectors, const std::string& public_ke
           "lease '" + vec.at("name").get<std::string>() + "' is refused by verify_lease with keys.publicKey");
   }
 
-  // The same outcome as an invalid public key.
   const std::string envelope = validate_ok.at("envelope").dump();
   const std::string token = lease_ok.at("token").get<std::string>();
   check_equal(velsigil::to_string(velsigil::verify_envelope_typed(envelope, "not-a-key", "n", "p", "validate", "").status),
@@ -304,7 +283,7 @@ void run_published_key_refusal(const json& vectors, const std::string& public_ke
               "verify_lease with an invalid public key");
 }
 
-// The same leases through the public Client offline path (store + clock injection, no network).
+// The same leases through the public Client offline path.
 void run_client_offline(const json& vectors, const std::string& public_key) {
   for (const json& vec : vectors.at("leases")) {
     const std::string name = vec.at("name").get<std::string>();
@@ -340,7 +319,6 @@ void run_client_offline(const json& vectors, const std::string& public_key) {
     }
   }
 
-  // Nothing stored -> no_lease.
   velsigil::ClientOptions options;
   options.hwid = "test-hwid-0001-abcdef";
   velsigil::Client client(kLoopbackApiUrl, vectors.at("leases").front().at("productId").get<std::string>(), public_key,
@@ -349,7 +327,6 @@ void run_client_offline(const json& vectors, const std::string& public_key) {
   check(!result.ok && result.code == "no_lease" && result.offline, "offline validation without a stored lease");
 }
 
-// Trial conversion references (SPEC 9.7): the format check and the "Buy now" link builder.
 void run_trial_ref_checks() {
   const std::string ref = "vtr1_Ab3_-Ab3_-Ab3_-";
   check(velsigil::is_trial_ref(ref), "is_trial_ref accepts [A-Za-z0-9_-]");

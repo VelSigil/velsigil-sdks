@@ -3,7 +3,7 @@ import { createServer, type IncomingHttpHeaders, type Server, type ServerRespons
 import type { AddressInfo, Socket } from 'node:net';
 import { vectors } from './vectors.js';
 
-/** PKCS#8 DER prefix for a raw 32-byte Ed25519 seed (RFC 8410). */
+/** PKCS#8 DER prefix for a raw 32-byte Ed25519 seed. */
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 
 export function privateKeyFromSeed(seedBase64: string): KeyObject {
@@ -17,16 +17,12 @@ export const PUBLIC_KEY = vectors.keys.publicKey;
 export const PRODUCT_ID = '0b9f4c1e-8d6a-4f7e-9c3b-2a1d5e6f7a8b';
 export const TEST_HWID = 'test-hwid-0001-abcdef';
 
-/**
- * A freshly generated Ed25519 public key (standard base64 of the raw 32 bytes, like the panel shows it).
- * For tests that build a client for a non-loopback URL: the vector keys are refused there.
- */
+/** For non-loopback URLs, where the vector keys are refused. */
 export function randomPublicKey(): string {
   const { x } = generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' });
   return Buffer.from(x!, 'base64url').toString('base64');
 }
 
-/** Signs a payload exactly like the server: base64url(UTF-8 JSON) + Ed25519 over the ASCII data. */
 export function signEnvelope(payload: unknown, key: KeyObject = GOOD_KEY): { data: string; sig: string; kid: string } {
   const data = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const sig = sign(null, Buffer.from(data, 'ascii'), key).toString('base64url');
@@ -44,11 +40,9 @@ export interface LeaseFields {
   iat: number;
   exp: number;
   typ?: string;
-  /** Free-trial lease (SPEC 9.7): adds the optional signed `trial` field. */
   trial?: unknown;
 }
 
-/** Builds a lease token `base64url(JSON).base64url(sig)`. */
 export function makeLease(fields: LeaseFields, key: KeyObject = GOOD_KEY): string {
   const payload = {
     v: 1,
@@ -93,10 +87,7 @@ const TYPE_BY_PATH: Record<string, string> = {
   '/api/client/v1/trial': 'trial',
 };
 
-/**
- * Builds a signed-response payload for `request` that echoes its nonce and productId.
- * `serverTime` defaults to the request timestamp so tests are independent of the wall clock.
- */
+/** `serverTime` defaults to the request timestamp so tests do not depend on the wall clock. */
 export function payloadFor(request: MockRequest, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const serverTime = typeof request.body.timestamp === 'number' ? request.body.timestamp : Math.floor(Date.now() / 1000);
   return {
@@ -131,11 +122,10 @@ export function payloadFor(request: MockRequest, overrides: Record<string, unkno
   };
 }
 
-/** A local HTTP server that speaks the Velsigil client protocol with scripted replies. */
 export class MockServer {
   readonly requests: MockRequest[] = [];
   handler: MockHandler = (request) => ({ kind: 'signed', payload: payloadFor(request) });
-  /** Extra plain GET routes (e.g. release files): path -> body. */
+  /** Plain GET routes such as release files. */
   readonly files = new Map<string, Buffer>();
   #server: Server | null = null;
   readonly #sockets = new Set<Socket>();
@@ -213,7 +203,7 @@ export class MockServer {
         res.end(reply.body);
         return;
       case 'hang':
-        return; // never answer; the client must time out
+        return;
       case 'destroy':
         res.socket?.destroy();
         return;

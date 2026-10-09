@@ -4,7 +4,7 @@ using System.Text;
 
 namespace Velsigil.Client.Internal;
 
-/// <summary>Small hashing / encoding helpers that work identically on netstandard2.0 and net8.0.</summary>
+/// <summary>Hashing and encoding helpers for netstandard2.0 and net8.0.</summary>
 internal static class Crypto
 {
     private static readonly char[] HexDigits = "0123456789abcdef".ToCharArray();
@@ -21,7 +21,6 @@ internal static class Crypto
         return new string(chars);
     }
 
-    /// <summary>SHA-256 of <paramref name="data"/>.</summary>
     public static byte[] Sha256(byte[] data)
     {
         using var sha = SHA256.Create();
@@ -54,7 +53,7 @@ internal static class Crypto
         return true;
     }
 
-    /// <summary>Length-checked, data-independent-time comparison of two ASCII strings (case-insensitive hex).</summary>
+    /// <summary>Constant-time, case-insensitive comparison of two hex strings.</summary>
     public static bool HexEquals(string a, string b)
     {
         if (a.Length != b.Length) return false;

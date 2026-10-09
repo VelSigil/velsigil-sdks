@@ -41,13 +41,12 @@ public class OfflineTests
         var clock = new FakeClock(Payloads.ServerTime);
         using var client = TestClients.Create(server, store, clock);
 
-        // 1. Online: verified response, lease persisted.
         var first = await client.ValidateWithOfflineFallbackAsync(Key);
         Assert.True(first.Ok);
         Assert.False(first.Offline);
         Assert.Equal(Vectors.ValidLeaseToken, store.GetLeaseToken(Vectors.ProductId));
 
-        // 2. Server unreachable a few hours later: the lease carries the app.
+        // Hours later, with the server unreachable.
         online = false;
         clock.Advance(TimeSpan.FromHours(6));
         var offline = await client.ValidateWithOfflineFallbackAsync(Key);
@@ -61,7 +60,7 @@ public class OfflineTests
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1769817600), offline.ExpiresAt);
         Assert.Null(offline.RequestId);
 
-        // 3. Past the lease expiry the fallback fails closed.
+        // Past the lease expiry the fallback fails closed.
         clock.Now = DateTimeOffset.FromUnixTimeSeconds(Vectors.LeaseExpiresAt);
         var expired = await client.ValidateWithOfflineFallbackAsync(Key);
         Assert.False(expired.Ok);
@@ -110,7 +109,7 @@ public class OfflineTests
         online = false;
         var later = await client.ValidateWithOfflineFallbackAsync(Key);
         Assert.False(later.Ok);
-        // No lease left: the original network failure is reported (same as every Velsigil SDK).
+        // No lease left: the original network failure is reported.
         Assert.Equal(ResultCodes.NetworkError, later.Code);
         Assert.False(later.Offline);
         Assert.Equal(ResultCodes.NoLease, client.ValidateOffline().Code);
@@ -130,13 +129,7 @@ public class OfflineTests
         Assert.Null(result.LeaseStatus);
     }
 
-    // ---- Server unavailable: every unsigned 5xx falls back like a network error (1.0.3) -----------------
-
-    /// <summary>
-    /// Unsigned 5xx answers of a license server that cannot decide: the app is up but its database is not (500 / 503
-    /// with a Velsigil error body, or the empty 503 of a newer server), the app is down behind IIS ARR / Caddy (502
-    /// HTML), a gateway timeout (504), and odd bodies.
-    /// </summary>
+    /// <summary>Unsigned 5xx answers: database down, app down behind a proxy, gateway timeout, odd bodies.</summary>
     private static HttpResponseMessage Unavailable(string kind) => kind switch
     {
         "500-json" => Responses.Error(500, "internal_error"),
@@ -174,7 +167,7 @@ public class OfflineTests
         store.SetDeviceSecret(Vectors.ProductId, Payloads.DeviceSecret);
         using var client = TestClients.Create(server, store, new FakeClock(Payloads.ServerTime + 60));
 
-        // ValidateAsync is unchanged: it reports the real error and never falls back.
+        // ValidateAsync itself never falls back.
         var online = await client.ValidateAsync(Key);
         Assert.False(online.Ok);
         Assert.False(online.Offline);
@@ -217,7 +210,6 @@ public class OfflineTests
         Assert.Equal(expected, result.Code);
         Assert.Equal(status, result.HttpStatus);
         Assert.Null(result.LeaseStatus);
-        // The request id of a Velsigil error body is kept (quote it to support).
         Assert.Equal(kind.Contains("-json", StringComparison.Ordinal) ? "11111111-2222-4333-8444-555555555555" : null, result.RequestId);
     }
 
@@ -300,7 +292,7 @@ public class OfflineTests
         Assert.Equal(status, result.HttpStatus);
         Assert.Null(result.LeaseStatus);
         Assert.Equal(kind == "429" ? TimeSpan.FromSeconds(12) : (TimeSpan?)null, result.RetryAfter);
-        // Revoking signed denials delete the lease; every other final answer keeps it for a later outage.
+        // Revoking denials delete the lease; other final answers keep it.
         var revokes = kind == "signed-revoked" || kind == "signed-expired";
         Assert.Equal(revokes ? null : Vectors.ValidLeaseToken, store.GetLeaseToken(Vectors.ProductId));
     }
@@ -342,7 +334,7 @@ public class OfflineTests
         var result = await client.ValidateWithOfflineFallbackAsync(Key);
 
         Assert.Equal(onlineCode, online.Code);
-        // The empty 503 carries Retry-After: 30 (1.0.4: read from every 429 and 503), and the fallback result keeps it.
+        // The empty 503 carries Retry-After: 30, and the fallback result keeps it.
         var retryAfter = kind == "503-empty" ? TimeSpan.FromSeconds(30) : (TimeSpan?)null;
         Assert.Equal(retryAfter, online.RetryAfter);
         Assert.True(result.Ok);
@@ -352,7 +344,7 @@ public class OfflineTests
     }
 
     [Theory]
-    [InlineData("503-empty", 30)]     // the empty 503 of a database outage (CLIENT_PROTOCOL 5.3)
+    [InlineData("503-empty", 30)]     // the empty 503 of a database outage
     [InlineData("503-json-busy", 5)]  // 503 service_busy
     [InlineData("500-json", null)]
     [InlineData("502-html", null)]
@@ -449,7 +441,7 @@ public class OfflineTests
     [InlineData("activation_rate_limited")]
     [InlineData("activations_disabled")]
     [InlineData("replay_detected")]
-    [InlineData("trial_already_used")] // SPEC 9.7: another key's trial refused on this device
+    [InlineData("trial_already_used")] // another key's trial refused on this device
     public async Task Non_definitive_signed_failures_keep_the_lease(string code)
     {
         var server = new MockServer();
@@ -556,8 +548,7 @@ public class OfflineTests
     [Fact]
     public async Task A_success_whose_lease_belongs_to_another_device_is_rejected_and_nothing_is_stored()
     {
-        // LIC-4: a license-sharing proxy rewrites hwid + device secret to those of one real activation;
-        // the signed answer then carries that device's lease (and a secret not meant for this device).
+        // A license-sharing proxy rewrote the request, so the signed answer carries another device's lease.
         var foreignLease = TestSigner.Primary.LeaseToken(new JsonObject
         {
             ["v"] = 1,

@@ -4,10 +4,7 @@ using System.Text.Json;
 
 namespace Velsigil.Client.Internal;
 
-/// <summary>
-/// Builds the JSON request body. Optional fields are omitted entirely when null (the server's schemas
-/// are strict); <c>nonce</c> and <c>timestamp</c> are appended per attempt so a retry is a fresh request.
-/// </summary>
+/// <summary>JSON request body; null fields are omitted because the server schemas are strict.</summary>
 internal sealed class RequestBody
 {
     private readonly List<KeyValuePair<string, string>> _fields = new List<KeyValuePair<string, string>>();

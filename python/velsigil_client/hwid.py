@@ -1,16 +1,4 @@
-"""Hardware id derivation (SPEC section 10.6, identical in every Velsigil SDK).
-
-``hwid = lowercase hex SHA-256("vx-hwid-v1:" + machineId)`` where
-``machineId`` is trimmed and lower-cased and comes from:
-
-* Windows: ``HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid`` (64-bit view)
-* Linux:   ``/etc/machine-id``, then ``/var/lib/dbus/machine-id`` (a file that
-  is empty or holds systemd's placeholder ``uninitialized`` is skipped)
-* macOS:   ``IOPlatformUUID`` from ``ioreg -rd1 -c IOPlatformExpertDevice``
-
-HWIDs are spoofable and are *not* a security boundary; the server pairs them
-with a per-device secret. Applications may supply their own identifier.
-"""
+"""Hardware id derivation; the same in every Velsigil SDK."""
 
 from __future__ import annotations
 
@@ -62,9 +50,7 @@ def _read_windows_machine_guid() -> str:
     return value
 
 
-#: systemd's placeholder in /etc/machine-id before the first boot commits an
-#: id (also left in images systemd never booted, where every copy would share
-#: it). Never a machine id: skipped like an empty file (CLIENT_PROTOCOL 8.1).
+# systemd's placeholder, which cloned images would share; skipped like an empty file.
 _MACHINE_ID_PLACEHOLDER = "uninitialized"
 
 
@@ -86,8 +72,7 @@ def _read_linux_machine_id() -> str:
 
 
 def _read_macos_platform_uuid() -> str:
-    # Absolute path only: resolving "ioreg" through PATH would let a writable
-    # PATH entry substitute the binary that produces our device identity.
+    # Absolute path only, so a PATH entry cannot substitute ioreg.
     if not os.path.isfile(_MACOS_IOREG):
         raise HardwareIdError("%s not found" % _MACOS_IOREG)
     try:
@@ -109,10 +94,7 @@ def _read_macos_platform_uuid() -> str:
 
 
 def read_machine_id(platform: Optional[str] = None) -> str:
-    """Return the raw (un-normalised) machine id of this computer.
-
-    Raises :class:`HardwareIdError` when it cannot be determined.
-    """
+    """Return the raw machine id; raises :class:`HardwareIdError` if unavailable."""
     plat = platform or sys.platform
     if plat.startswith("win"):
         raw = _read_windows_machine_guid()

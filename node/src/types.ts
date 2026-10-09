@@ -1,6 +1,4 @@
-/** Request/response types of the Velsigil client protocol (SPEC section 10). */
-
-/** The endpoint a request went to; `trial` = an in-app free-trial start (`POST /trial`, SPEC 9.7). */
+/** The endpoint a request went to. */
 export type RequestType = 'validate' | 'deactivate' | 'update_check' | 'download' | 'trial';
 
 export type LicenseStatus = 'pending' | 'active' | 'suspended' | 'expired' | 'revoked' | 'banned';
@@ -17,12 +15,9 @@ export interface ProtocolLicense {
   maxDevices: number;
   devicesUsed: number;
   createdAt: number;
-  /**
-   * Optional: the trial's conversion reference (SPEC 9.7, servers since 2026-10-06), only on a free trial a purchase
-   * can still convert. An opaque string of 1-200 characters of `[A-Za-z0-9_-]` the app adds to its "Buy now" link.
-   */
+  /** Conversion reference of a free trial; add it to the "Buy now" link with `withTrialRef`. */
   trialRef?: string;
-  /** Optional: `true` for a free-trial license (SPEC 9.7). Left out by the server otherwise (and by older servers). */
+  /** `true` for a free-trial license. */
   trial?: boolean;
 }
 
@@ -32,10 +27,7 @@ export interface ProtocolActivation {
   status: ActivationStatus;
   firstSeenAt: number;
   deviceSecret: string | null;
-  /**
-   * Optional lowercase hex SHA-256 of the hwid the activation belongs to. When present it must equal
-   * SHA-256 of the hwid this client sent, otherwise the response is rejected (`hwid_mismatch`).
-   */
+  /** SHA-256 of the hwid; the response is rejected if it does not match this device. */
   hwidHash?: string;
 }
 
@@ -61,7 +53,7 @@ export interface ProtocolDownload {
   version: string;
 }
 
-/** The started free trial of an `ok` answer of type `trial` (SPEC 10.1): the new license key. */
+/** The started free trial: the new license key. */
 export interface ProtocolTrial {
   key: string;
 }
@@ -82,14 +74,11 @@ export interface ResponsePayload {
   lease: ProtocolLease | null;
   update: ProtocolUpdate | null;
   download: ProtocolDownload | null;
-  /**
-   * Present only on an `ok` answer of type `trial` (an in-app trial start): the key of the new trial license. The
-   * parser drops the field from every other answer.
-   */
+  /** Only on an `ok` answer of type `trial`. */
   trial?: ProtocolTrial;
 }
 
-/** Decoded first segment of an offline lease token (SPEC section 10.4). */
+/** Decoded payload of an offline lease token. */
 export interface LeasePayload {
   v: 1;
   typ: 'lease';
@@ -102,7 +91,7 @@ export interface LeasePayload {
   licenseExpiresAt: number | null;
   iat: number;
   exp: number;
-  /** Optional: `true` when the lease belongs to a free-trial license (SPEC 9.7); left out otherwise. */
+  /** `true` when the lease belongs to a free-trial license. */
   trial?: boolean;
 }
 

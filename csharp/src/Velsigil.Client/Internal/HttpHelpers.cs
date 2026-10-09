@@ -26,10 +26,7 @@ internal static class HttpHelpers
 
     private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromDays(1);
 
-    /// <summary>
-    /// Reads at most <paramref name="maxBytes"/> of the response body. Returns null when the body is larger
-    /// (the remainder is never buffered).
-    /// </summary>
+    /// <summary>Reads at most <paramref name="maxBytes"/>; null when the body is larger (never buffered).</summary>
     public static async Task<byte[]?> ReadBodyAsync(HttpContent? content, int maxBytes, CancellationToken cancellationToken)
     {
         if (content is null) return Array.Empty<byte>();
@@ -53,21 +50,7 @@ internal static class HttpHelpers
         return buffer.ToArray();
     }
 
-    /// <summary>
-    /// Maps a non-200 response to a failure code (SPEC section 14, identical in every Velsigil SDK). A
-    /// recognised code in a Velsigil error body (<c>{"error":{"code":…}}</c>) wins; otherwise the HTTP status
-    /// decides. Gateway errors without a Velsigil error body (502/503/504, typically a reverse proxy while the
-    /// server is down) count as <see cref="ResultCodes.NetworkError"/>; with a Velsigil error body they are
-    /// <see cref="ResultCodes.InternalError"/>. The offline fallback does not depend on this code: it applies to every
-    /// unsigned 5xx (VelsigilClient.IsServerUnavailable), so this mapping (what <c>ValidateAsync</c> reports) is unchanged.
-    /// </summary>
-    /// <param name="status">The HTTP status.</param>
-    /// <param name="body">The (bounded) response body.</param>
-    /// <param name="requestId">The request id of a Velsigil error body, if any.</param>
-    /// <param name="trialRequest">
-    /// The request went to the in-app trial endpoint: a Velsigil 404 <c>not_found</c> there means the server
-    /// predates the endpoint (<see cref="ResultCodes.PanelTooOld"/>).
-    /// </param>
+    /// <summary>Maps a non-200 response to a failure code, the same in every Velsigil SDK.</summary>
     public static string MapUnsignedErrorCode(int status, byte[]? body, out string? requestId, bool trialRequest = false)
     {
         requestId = null;
