@@ -18,7 +18,7 @@
 namespace velsigil {
 
 /// SDK version.
-inline constexpr char kSdkVersion[] = "1.0.4";
+inline constexpr char kSdkVersion[] = "1.0.5";
 
 /// Result codes returned in ValidationResult::code.
 namespace codes {

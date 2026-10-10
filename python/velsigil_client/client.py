@@ -54,7 +54,7 @@ from .models import (
 )
 from .store import LicenseStore, MemoryStore, StoredState
 
-SDK_VERSION = "1.0.4"
+SDK_VERSION = "1.0.5"
 
 API_PATH = "/api/client/v1"
 DEFAULT_TIMEOUT = 15.0

@@ -1,5 +1,11 @@
 # Changelog - Velsigil Node.js SDK (`velsigil-client`)
 
+## 1.0.5 (2026-10-09)
+
+### Changed
+
+- Shorter code and doc comments. No behaviour change.
+
 ## 1.0.4 (2026-10-08)
 
 ### Added

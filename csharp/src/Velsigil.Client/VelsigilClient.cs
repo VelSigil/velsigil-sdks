@@ -21,7 +21,7 @@ namespace Velsigil.Client;
 public sealed class VelsigilClient : IDisposable
 {
     /// <summary>SDK version, sent in the User-Agent header.</summary>
-    public const string SdkVersion = "1.0.4";
+    public const string SdkVersion = "1.0.5";
 
     private const string TypeValidate = "validate";
     private const string TypeDeactivate = "deactivate";

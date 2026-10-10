@@ -1,6 +1,6 @@
 {
   "name": "velsigil-client",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Official Node.js client for Velsigil license validation (Ed25519-verified responses, offline leases, device binding)",
   "type": "module",
   "license": "MIT",
